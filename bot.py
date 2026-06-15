@@ -774,20 +774,35 @@ async def _check_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
     alts    = [a.lower() for a in g["current"].get("alternatives", [])]
     ok      = (ans == correct or ans in alts)
     g["waiting"] = True
-    if ok:
-        if uid_s not in g["scores"]:
-            g["scores"][uid_s] = {"name": raw_nm, "count": 0}
-        g["scores"][uid_s]["count"] += 1
-        ball = g["scores"][uid_s]["count"]
-        await update.message.reply_text(
-            f"✅ *TO'G'RI!* 🎉\n👤 {dname}: {ball} ball\n\n⏩ Keyingi...",
-            parse_mode="Markdown")
-    else:
-        alt_t = f"\n➕ Shuningdek: _{', '.join(alts)}_" if alts else ""
-        await update.message.reply_text(
-            f"❌ *XATO!*\n✅ To'g'ri: *{correct}*{alt_t}\n\n⏩ Keyingi...",
-            parse_mode="Markdown")
-    g["waiting"] = False
+    try:
+        if ok:
+            if uid_s not in g["scores"]:
+                g["scores"][uid_s] = {"name": raw_nm, "count": 0}
+            g["scores"][uid_s]["count"] += 1
+            ball = g["scores"][uid_s]["count"]
+            try:
+                await update.message.reply_text(
+                    f"✅ *TO'G'RI!* 🎉\n👤 {dname}: {ball} ball\n\n⏩ Keyingi...",
+                    parse_mode="Markdown")
+            except Exception:
+                await context.bot.send_message(
+                    cid,
+                    f"✅ *TO'G'RI!* 🎉\n👤 {dname}: {ball} ball\n\n⏩ Keyingi...",
+                    parse_mode="Markdown")
+        else:
+            alt_t = f"\n➕ Shuningdek: _{', '.join(alts)}_" if alts else ""
+            try:
+                await update.message.reply_text(
+                    f"❌ *XATO!*\n✅ To'g'ri: *{correct}*{alt_t}\n\n⏩ Keyingi...",
+                    parse_mode="Markdown")
+            except Exception:
+                await context.bot.send_message(
+                    cid,
+                    f"❌ *XATO!*\n✅ To'g'ri: *{correct}*{alt_t}\n\n⏩ Keyingi...",
+                    parse_mode="Markdown")
+    finally:
+        g["waiting"] = False
+
     if g["asked"] >= len(g["questions"]):
         await finish_game(cid, context)
     else:
