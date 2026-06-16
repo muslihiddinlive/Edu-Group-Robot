@@ -179,8 +179,16 @@ def load_badwords() -> dict:
 def save_badwords(d: dict): _jsave(BADWORDS_FILE, d)
 
 def _has_badword(text: str, words: list) -> bool:
+    """So'zni to'liq chegaralarida tekshiradi (masalan 'kal' → 'kalendar'da TOPILMAYDI)."""
     tl = text.lower()
-    return any(w and w in tl for w in words)
+    for w in words:
+        if not w:
+            continue
+        # So'z boshida/oxirida harf/raqam bo'lmasa — to'liq so'z deb hisoblaymiz
+        pattern = r'(?<![a-zA-Zа-яА-ЯёЁa-zA-Z0-9\u0400-\u04FF])' + re.escape(w) + r'(?![a-zA-Zа-яА-ЯёЁa-zA-Z0-9\u0400-\u04FF])'
+        if re.search(pattern, tl):
+            return True
+    return False
 
 def _random_warning(warnings: list) -> str:
     return random.choice(warnings) if warnings else "⚠️ So'kinma!"
@@ -774,35 +782,20 @@ async def _check_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
     alts    = [a.lower() for a in g["current"].get("alternatives", [])]
     ok      = (ans == correct or ans in alts)
     g["waiting"] = True
-    try:
-        if ok:
-            if uid_s not in g["scores"]:
-                g["scores"][uid_s] = {"name": raw_nm, "count": 0}
-            g["scores"][uid_s]["count"] += 1
-            ball = g["scores"][uid_s]["count"]
-            try:
-                await update.message.reply_text(
-                    f"✅ *TO'G'RI!* 🎉\n👤 {dname}: {ball} ball\n\n⏩ Keyingi...",
-                    parse_mode="Markdown")
-            except Exception:
-                await context.bot.send_message(
-                    cid,
-                    f"✅ *TO'G'RI!* 🎉\n👤 {dname}: {ball} ball\n\n⏩ Keyingi...",
-                    parse_mode="Markdown")
-        else:
-            alt_t = f"\n➕ Shuningdek: _{', '.join(alts)}_" if alts else ""
-            try:
-                await update.message.reply_text(
-                    f"❌ *XATO!*\n✅ To'g'ri: *{correct}*{alt_t}\n\n⏩ Keyingi...",
-                    parse_mode="Markdown")
-            except Exception:
-                await context.bot.send_message(
-                    cid,
-                    f"❌ *XATO!*\n✅ To'g'ri: *{correct}*{alt_t}\n\n⏩ Keyingi...",
-                    parse_mode="Markdown")
-    finally:
-        g["waiting"] = False
-
+    if ok:
+        if uid_s not in g["scores"]:
+            g["scores"][uid_s] = {"name": raw_nm, "count": 0}
+        g["scores"][uid_s]["count"] += 1
+        ball = g["scores"][uid_s]["count"]
+        await update.message.reply_text(
+            f"✅ *TO'G'RI!* 🎉\n👤 {dname}: {ball} ball\n\n⏩ Keyingi...",
+            parse_mode="Markdown")
+    else:
+        alt_t = f"\n➕ Shuningdek: _{', '.join(alts)}_" if alts else ""
+        await update.message.reply_text(
+            f"❌ *XATO!*\n✅ To'g'ri: *{correct}*{alt_t}\n\n⏩ Keyingi...",
+            parse_mode="Markdown")
+    g["waiting"] = False
     if g["asked"] >= len(g["questions"]):
         await finish_game(cid, context)
     else:
@@ -2238,6 +2231,10 @@ async def check_profanity(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if not msg or not msg.text or not user:
         return
+    # Botlarni (shu jumladan boshqa botlar) o'tkazib yuboramiz
+    if user.is_bot:
+        return
+    # Superadminni o'tkazib yuboramiz
     if user.id == SUPERADMIN:
         return
 
