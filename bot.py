@@ -1,45 +1,23 @@
 #!/usr/bin/env python3
 """
-Lang Bot v4.1
+Lang Bot v5.0
 REQUIRES: pip install "python-telegram-bot[job-queue]==21.9" aiohttp
 
-YANGI (v4.1):
-  - Webhook rejimi (Render + UptimeRobot uchun) — polling o'rniga
-  - Maxfiy ma'lumotlar (BOT_TOKEN, SUPERADMIN_ID, EXPORT_CHANNEL_ID)
-    endi ENV o'zgaruvchilardan o'qiladi (ochiq kodda emas!)
-  - Bot ishga tushganda zahira kanalidagi PIN qilingan eksportdan
-    avtomatik tiklanadi (Render kabi vaqtinchalik disk uchun)
-  - Faqat topic egasi (yoki superadmin) o'z topicining
-    /edittopicaccess sozlamasini o'zgartira oladi
+YANGI (v5.0):
+  - Foydalanuvchi tizimi (users.json) + referral
+  - Tarif tizimi: Free / PLUS ✨ / Premium 💎 / VIP 👑
+  - Telegram Stars to'lov
+  - 🔥 Reaksiya (tarif egalariga)
+  - Supergroup forum topic boshqaruvi
+    (VIP/Premium/PLUS/Backup topic'lari, class topic'lari)
+  - VIP: admin qo'shish huquqi (max 2 ta)
+  - Inline button asosli UI (oddiy userlar uchun faqat button)
+  - Superadmin: /setprice, /setchannel, /delmsgs, /delbotmsg
 
-YANGI (v4.0):
-  - Topic access control (kimlar savol qo'sha oladi)
-  - Admin ierarxiya: Superadmin → Admin (can_add) → Sub-admin
-  - Display name (superadmin va adminlar uchun, hamma joyda ko'rinadi)
-  - Xabar tracking + kengaytirilgan /del
-  - /edittopicaccess, /setdisplayname
-
-Superadmin:
-  /addadmin /removeadmin /listadmins /editadmin /setdisplayname
-  /newtopic /listtopics /deletetopic /setprize /edittopicaccess
-  /addq /bulkq /listgames /newgame /endgame /scores /del
-  /broadcast /export /restore
-
-Admin:
-  /newtopic /listtopics /addq /bulkq /edittopicaccess (faqat o'z topiclari)
-  /listadmins (o'z sub-adminlari) — agar huquq bo'lsa /addadmin
-
-KERAKLI ENV O'ZGARUVCHILAR:
-  BOT_TOKEN         - @BotFather'dan olingan token
-  SUPERADMIN_ID     - superadminning Telegram user ID (raqam)
-  EXPORT_CHANNEL_ID - zahira/eksport kanali ID (masalan -1001234567890,
-                       bot bu kanalda ADMIN bo'lishi shart — pin qilish uchun)
-  WEBHOOK_URL       - (ixtiyoriy) https://<app-nomi>.onrender.com
-                       Render avtomatik beradigan RENDER_EXTERNAL_URL
-                       mavjud bo'lsa, shuni ham ishlatish mumkin
-  WEBHOOK_SECRET    - (ixtiyoriy, lekin tavsiya etiladi) maxfiy token,
-                       faqat Telegramdan kelgan so'rovlarni tasdiqlash uchun
-  PORT              - (Render avtomatik beradi, odatda kerak emas)
+KERAKLI ENV:
+  BOT_TOKEN, SUPERADMIN_ID, WEBHOOK_URL (yoki RENDER_EXTERNAL_URL)
+  WEBHOOK_SECRET (ixtiyoriy)
+  SUPERGROUP_ID  - forum topic ochish uchun supergroup ID
 """
 
 import asyncio, io, json, os, random, logging, re
@@ -55,33 +33,34 @@ from telegram import (
     InlineKeyboardMarkup,
     ReplyKeyboardMarkup,
     ReplyKeyboardRemove,
+    LabeledPrice,
+    ReactionTypeEmoji,
 )
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
-    MessageHandler, ChatMemberHandler, filters, ContextTypes,
+    MessageHandler, ChatMemberHandler, PreCheckoutQueryHandler,
+    filters, ContextTypes,
 )
+from telegram.constants import ReactionEmoji
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
 # ══════════════════════════════════════════════════════
-#  CONFIG  (maxfiy qiymatlar ENV orqali — hech qachon kodga yozmang!)
+#  CONFIG
 # ══════════════════════════════════════════════════════
 
 def _require_env(key: str) -> str:
     val = os.environ.get(key)
     if not val:
-        raise SystemExit(
-            f"❌ '{key}' ENV o'zgaruvchisi topilmadi! "
-            f"Render → Environment bo'limida sozlang.")
+        raise SystemExit(f"❌ '{key}' ENV topilmadi!")
     return val
 
 BOT_TOKEN      = _require_env("BOT_TOKEN")
 SUPERADMIN     = int(_require_env("SUPERADMIN_ID"))
-EXPORT_CHANNEL = int(_require_env("EXPORT_CHANNEL_ID"))
+SUPERGROUP_ID  = int(os.environ.get("SUPERGROUP_ID", "-1003957600908"))
 
-# ── Webhook (Render) ──
 PORT           = int(os.environ.get("PORT", "8080"))
 WEBHOOK_URL    = (os.environ.get("WEBHOOK_URL")
                   or os.environ.get("RENDER_EXTERNAL_URL")
@@ -89,6 +68,7 @@ WEBHOOK_URL    = (os.environ.get("WEBHOOK_URL")
 WEBHOOK_PATH   = f"webhook/{BOT_TOKEN}"
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "")
 
+# Limitlar
 MAX_TOPICS     = 10
 MAX_QUESTIONS  = 1000
 TOPICS_DIR     = "topics"
@@ -96,9 +76,49 @@ ADMINS_FILE    = "admins.json"
 CHATS_FILE     = "chats.json"
 CONFIG_FILE    = "config.json"
 BADWORDS_FILE  = "badwords.json"
+USERS_FILE     = "users.json"
 MAX_MSG_HISTORY = 10000
-EXPORT_VERSION  = 4
+EXPORT_VERSION  = 5
 BROADCAST_READY = "✅ Tayyor — Yuborishni boshlash"
+
+# Tarif identifikatorlari
+TARIF_FREE    = "free"
+TARIF_PLUS    = "plus"
+TARIF_PREMIUM = "premium"
+TARIF_VIP     = "vip"
+
+TARIF_NAMES = {
+    TARIF_FREE:    "Free",
+    TARIF_PLUS:    "PLUS ✨",
+    TARIF_PREMIUM: "Premium 💎",
+    TARIF_VIP:     "VIP 👑",
+}
+
+# Default tarif narxlari (stars) — config.json'da o'zgartiriladi
+DEFAULT_PRICES = {
+    TARIF_PLUS:    25,
+    TARIF_PREMIUM: 50,
+    TARIF_VIP:     500,
+}
+
+# Default tarif limitlari
+TARIF_TOPIC_LIMIT = {
+    TARIF_FREE:    1,    # +1 har 3 referal, max 5
+    TARIF_PLUS:    10,
+    TARIF_PREMIUM: 20,
+    TARIF_VIP:     70,
+}
+
+TARIF_Q_LIMIT = {
+    TARIF_FREE:    10,   # obuna bo'lsa +10
+    TARIF_PLUS:    100,
+    TARIF_PREMIUM: 200,
+    TARIF_VIP:     1500,
+}
+
+# Free user uchun referral bilan max topic
+FREE_MAX_TOPIC_REFERRAL = 5
+FREE_REFERRAL_PER_TOPIC = 3  # har 3 referalda +1
 
 TARGET_NAMES = {
     "all":      "👥 Hammaga",
@@ -160,7 +180,7 @@ def all_topics() -> list:
 def count_topics() -> int:
     return sum(1 for f in os.listdir(TOPICS_DIR) if f.endswith(".json"))
 
-# ── Admins ──
+# ── Admins, Chats, Config, Badwords ──
 def load_admins() -> dict:  return _jload(ADMINS_FILE)
 def save_admins(d: dict):   _jsave(ADMINS_FILE, d)
 def load_chats() -> dict:   return _jload(CHATS_FILE)
@@ -168,7 +188,6 @@ def save_chats(d: dict):    _jsave(CHATS_FILE, d)
 def load_config() -> dict:  return _jload(CONFIG_FILE)
 def save_config(d: dict):   _jsave(CONFIG_FILE, d)
 
-# ── Bad words ──
 def load_badwords() -> dict:
     d = _jload(BADWORDS_FILE)
     d.setdefault("words", [])
@@ -178,13 +197,151 @@ def load_badwords() -> dict:
 
 def save_badwords(d: dict): _jsave(BADWORDS_FILE, d)
 
+# ── Users ──
+def load_users() -> dict:
+    return _jload(USERS_FILE)
+
+def save_users(d: dict):
+    _jsave(USERS_FILE, d)
+
+def get_user(uid: int) -> dict | None:
+    return load_users().get(str(uid))
+
+def save_user(uid: int, data: dict):
+    users = load_users()
+    users[str(uid)] = data
+    save_users(users)
+
+def register_user(user, ref_by: int | None = None) -> bool:
+    """User'ni ro'yxatga oladi. Yangi bo'lsa True qaytaradi."""
+    users = load_users()
+    uid   = str(user.id)
+    if uid in users:
+        # Ma'lumotlarni yangilash
+        users[uid]["first_name"] = user.first_name or ""
+        users[uid]["last_name"]  = user.last_name or ""
+        users[uid]["username"]   = user.username or ""
+        save_users(users)
+        return False
+    now = datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S")
+    users[uid] = {
+        "id":            user.id,
+        "first_name":    user.first_name or "",
+        "last_name":     user.last_name  or "",
+        "username":      user.username   or "",
+        "language_code": getattr(user, "language_code", "") or "",
+        "joined_at":     now,
+        "referral_by":   ref_by,
+        "referral_count": 0,
+        "tarif":         TARIF_FREE,
+        "tarif_expires": None,
+        "is_subscribed": False,
+    }
+    save_users(users)
+    # Referalni hisoblaymiz
+    if ref_by and str(ref_by) != uid:
+        _add_referral(ref_by)
+    return True
+
+def _add_referral(ref_uid: int):
+    users = load_users()
+    k = str(ref_uid)
+    if k in users:
+        users[k]["referral_count"] = users[k].get("referral_count", 0) + 1
+        save_users(users)
+
+def get_user_tarif(uid: int) -> str:
+    if uid == SUPERADMIN:
+        return TARIF_VIP
+    u = get_user(uid)
+    if not u:
+        return TARIF_FREE
+    # Muddatini tekshirish
+    tarif = u.get("tarif", TARIF_FREE)
+    exp   = u.get("tarif_expires")
+    if tarif != TARIF_FREE and exp:
+        try:
+            exp_dt = datetime.fromisoformat(exp)
+            if datetime.now(TZ) > exp_dt:
+                # Muddati o'tgan
+                users = load_users()
+                users[str(uid)]["tarif"]         = TARIF_FREE
+                users[str(uid)]["tarif_expires"] = None
+                save_users(users)
+                return TARIF_FREE
+        except Exception:
+            pass
+    return tarif
+
+def get_user_topic_limit(uid: int) -> int:
+    """User uchun topic limiti."""
+    if uid == SUPERADMIN:
+        return 9999
+    # Admin bo'lsa
+    adm = load_admins()
+    if str(uid) in adm:
+        return adm[str(uid)].get("topic_limit", 0)
+    tarif = get_user_tarif(uid)
+    base  = TARIF_TOPIC_LIMIT.get(tarif, 1)
+    if tarif == TARIF_FREE:
+        u  = get_user(uid)
+        rc = u.get("referral_count", 0) if u else 0
+        bonus = min(rc // FREE_REFERRAL_PER_TOPIC, FREE_MAX_TOPIC_REFERRAL - 1)
+        return min(base + bonus, FREE_MAX_TOPIC_REFERRAL)
+    return base
+
+def get_user_q_limit(uid: int) -> int:
+    """User uchun 1 topic'dagi savol limiti."""
+    if uid == SUPERADMIN:
+        return MAX_QUESTIONS
+    # Admin bo'lsa
+    adm = load_admins()
+    if str(uid) in adm:
+        return adm[str(uid)].get("max_questions", MAX_QUESTIONS)
+    tarif = get_user_tarif(uid)
+    limit = TARIF_Q_LIMIT.get(tarif, 10)
+    if tarif == TARIF_FREE:
+        u  = get_user(uid)
+        if u and u.get("is_subscribed"):
+            limit += 10
+    return limit
+
+def get_tarif_prices() -> dict:
+    cfg = load_config()
+    prices = cfg.get("tarif_prices", {})
+    result = {}
+    for t in (TARIF_PLUS, TARIF_PREMIUM, TARIF_VIP):
+        result[t] = prices.get(t, DEFAULT_PRICES[t])
+    return result
+
+def get_sub_channel() -> int | None:
+    return load_config().get("sub_channel")
+
+def set_sub_channel(cid: int | None):
+    cfg = load_config()
+    if cid:
+        cfg["sub_channel"] = cid
+    else:
+        cfg.pop("sub_channel", None)
+    save_config(cfg)
+
+async def check_subscription(bot, uid: int) -> bool:
+    """Kanalga obuna bo'lganini tekshiradi."""
+    ch = get_sub_channel()
+    if not ch:
+        return False
+    try:
+        m = await bot.get_chat_member(ch, uid)
+        return m.status in ("member", "administrator", "creator")
+    except Exception:
+        return False
+
+# ── Bad words ──
 def _has_badword(text: str, words: list) -> bool:
-    """So'zni to'liq chegaralarida tekshiradi (masalan 'kal' → 'kalendar'da TOPILMAYDI)."""
     tl = text.lower()
     for w in words:
         if not w:
             continue
-        # So'z boshida/oxirida harf/raqam bo'lmasa — to'liq so'z deb hisoblaymiz
         pattern = r'(?<![a-zA-Zа-яА-ЯёЁa-zA-Z0-9\u0400-\u04FF])' + re.escape(w) + r'(?![a-zA-Zа-яА-ЯёЁa-zA-Z0-9\u0400-\u04FF])'
         if re.search(pattern, tl):
             return True
@@ -193,7 +350,7 @@ def _has_badword(text: str, words: list) -> bool:
 def _random_warning(warnings: list) -> str:
     return random.choice(warnings) if warnings else "⚠️ So'kinma!"
 
-# ── Group settings helpers ──
+# ── Group settings ──
 def get_group_setting(chat_id: int, key: str, default=False):
     return load_chats().get(str(chat_id), {}).get(key, default)
 
@@ -216,7 +373,10 @@ def get_admin_topic_limit(uid: int) -> int:
 def get_admin_max_questions(uid: int) -> int:
     if uid == SUPERADMIN:
         return MAX_QUESTIONS
-    return load_admins().get(str(uid), {}).get("max_questions", MAX_QUESTIONS)
+    adm = load_admins()
+    if str(uid) in adm:
+        return adm[str(uid)].get("max_questions", MAX_QUESTIONS)
+    return get_user_q_limit(uid)
 
 def count_admin_topics(uid: int) -> int:
     return sum(1 for t in all_topics() if t.get("created_by") == uid)
@@ -224,9 +384,7 @@ def count_admin_topics(uid: int) -> int:
 def count_sub_admins(admin_uid: int) -> int:
     return sum(1 for v in load_admins().values() if v.get("added_by") == admin_uid)
 
-# ── Display name ──
 def get_display_name(uid: int, fallback: str) -> str:
-    """Superadmin barcha uchun belgilaydi. Hamma joyda shu ko'rinadi."""
     if uid == SUPERADMIN:
         return load_config().get("display_name", fallback)
     return load_admins().get(str(uid), {}).get("display_name", fallback)
@@ -248,9 +406,7 @@ def set_display_name(uid: int, name: str | None):
                 adm[str(uid)].pop("display_name", None)
             save_admins(adm)
 
-# ── Topic access ──
 def parse_allowed(text: str) -> list:
-    """'@ali 123456 @vali' → ['@ali', 123456, '@vali']"""
     result = []
     for item in re.split(r'[\s,]+', text.strip()):
         item = item.strip()
@@ -273,7 +429,6 @@ def check_allowed(uid: int, username: str | None, allowed: list) -> bool:
     return False
 
 def can_manage_topic(topic: dict, uid: int, username: str = None) -> bool:
-    """Bu user topicga savol qo'sha oladimi?"""
     if uid == SUPERADMIN:
         return True
     cb  = topic.get("created_by")
@@ -291,16 +446,12 @@ def can_manage_topic(topic: dict, uid: int, username: str = None) -> bool:
     return False
 
 def can_edit_topic_access(topic: dict, uid: int) -> bool:
-    """Topicning RUXSAT (/edittopicaccess) sozlamasini faqat superadmin
-    yoki o'sha topicni yaratgan admin o'zgartira oladi — boshqa
-    adminlar (garchi savol qo'sha olsa ham) bu sozlamani o'zgartira olmaydi."""
     if uid == SUPERADMIN:
         return True
     return topic.get("created_by") == uid
 
-# ── Chats ──
 def register_chat(chat):
-    if chat.id in (EXPORT_CHANNEL, SUPERADMIN):
+    if chat.id == SUPERADMIN:
         return
     chats = load_chats()
     chats[str(chat.id)] = {
@@ -323,6 +474,61 @@ def _matches(chat_type: str, target: str) -> bool:
     return False
 
 # ══════════════════════════════════════════════════════
+#  USER INFO FORMATTER
+# ══════════════════════════════════════════════════════
+
+def format_user_info(user=None, uid: int = None) -> str:
+    """Telegram user yoki uid dan to'liq ma'lumot shakllantiradi."""
+    u_data = None
+    if uid:
+        u_data = get_user(uid)
+    elif user:
+        uid = user.id
+        u_data = get_user(user.id)
+
+    if user:
+        fn   = user.first_name or "—"
+        ln   = user.last_name  or "—"
+        uname = f"@{user.username}" if user.username else "—"
+        lang = getattr(user, "language_code", "—") or "—"
+        is_bot = "✅" if getattr(user, "is_bot", False) else "❌"
+        is_premium = "✅" if getattr(user, "is_premium", False) else "❌"
+    elif u_data:
+        fn   = u_data.get("first_name", "—")
+        ln   = u_data.get("last_name",  "—")
+        uname = f"@{u_data['username']}" if u_data.get("username") else "—"
+        lang = u_data.get("language_code", "—") or "—"
+        is_bot = "—"
+        is_premium = "—"
+    else:
+        return f"👤 ID: `{uid}`\n_(Ma'lumot topilmadi)_"
+
+    tarif = get_user_tarif(uid) if uid else "—"
+    tarif_name = TARIF_NAMES.get(tarif, tarif)
+    topics_count = count_admin_topics(uid) if uid else "—"
+    ref_count = u_data.get("referral_count", 0) if u_data else "—"
+    joined = u_data.get("joined_at", "—") if u_data else "—"
+    ref_by = u_data.get("referral_by", "—") if u_data else "—"
+    subscribed = "✅" if u_data and u_data.get("is_subscribed") else "❌"
+
+    return (
+        f"👤 *Foydalanuvchi ma'lumotlari:*\n\n"
+        f"🆔 ID: `{uid}`\n"
+        f"👤 Ism: *{fn}*\n"
+        f"👤 Familiya: *{ln}*\n"
+        f"📛 Username: {uname}\n"
+        f"🌐 Til: `{lang}`\n"
+        f"🤖 Bot: {is_bot}\n"
+        f"⭐ Telegram Premium: {is_premium}\n"
+        f"📅 Qo'shilgan: `{joined}`\n"
+        f"💎 Tarif: *{tarif_name}*\n"
+        f"📁 Topiclar: {topics_count}\n"
+        f"👥 Referallar: {ref_count}\n"
+        f"🔗 Referral by: `{ref_by}`\n"
+        f"📢 Obuna: {subscribed}"
+    )
+
+# ══════════════════════════════════════════════════════
 #  GAME STATE
 # ══════════════════════════════════════════════════════
 games: dict = {}
@@ -337,9 +543,9 @@ def get_game(chat_id: int) -> dict:
     return games[chat_id]
 
 # ══════════════════════════════════════════════════════
-#  MESSAGE HISTORY  (for /del)
+#  MESSAGE HISTORY
 # ══════════════════════════════════════════════════════
-msg_history: dict = {}   # {chat_id: [{"id","uid","uname","ts"}]}
+msg_history: dict = {}
 
 def track_msg(chat_id: int, msg_id: int, uid: int, username: str, ts: float):
     h = msg_history.setdefault(chat_id, [])
@@ -366,7 +572,6 @@ def is_superadmin(uid: int) -> bool:
     return uid == SUPERADMIN
 
 async def _require_bot_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """Guruhda 'require_admin' yoniq bo'lsa, bot admin emasligini tekshiradi."""
     chat = update.effective_chat
     if chat.type not in ("group", "supergroup"):
         return True
@@ -398,6 +603,579 @@ async def is_group_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         except Exception:
             return False
     return False
+
+# ══════════════════════════════════════════════════════
+#  REACTION
+# ══════════════════════════════════════════════════════
+async def send_fire_reaction(bot, chat_id: int, msg_id: int):
+    """Tarif egasiga 🔥 reaksiya."""
+    try:
+        await bot.set_message_reaction(
+            chat_id=chat_id,
+            message_id=msg_id,
+            reaction=[ReactionTypeEmoji(emoji="🔥")],
+            is_big=False,
+        )
+    except Exception as e:
+        logger.debug(f"Reaction error: {e}")
+
+# ══════════════════════════════════════════════════════
+#  SUPERGROUP FORUM TOPICS
+# ══════════════════════════════════════════════════════
+
+# Forum topic ID'larini config'da saqlaymiz
+def get_forum_topics() -> dict:
+    return load_config().get("forum_topics", {})
+
+def save_forum_topics(data: dict):
+    cfg = load_config()
+    cfg["forum_topics"] = data
+    save_config(cfg)
+
+async def ensure_forum_topic(bot, name: str, key: str, icon_color: int = 0x6FB9F0) -> int | None:
+    """Topic mavjud bo'lmasa yaratadi, ID qaytaradi."""
+    if not SUPERGROUP_ID:
+        return None
+    ft = get_forum_topics()
+    if key in ft:
+        return ft[key]
+    try:
+        result = await bot.create_forum_topic(
+            chat_id=SUPERGROUP_ID,
+            name=name,
+            icon_color=icon_color,
+        )
+        tid = result.message_thread_id
+        ft[key] = tid
+        save_forum_topics(ft)
+        logger.info(f"Forum topic yaratildi: {name} → {tid}")
+        return tid
+    except Exception as e:
+        logger.warning(f"Forum topic yaratib bo'lmadi ({name}): {e}")
+        return None
+
+# Tarif uchun rang
+TARIF_COLORS = {
+    TARIF_VIP:     0xFFD67E,  # oltin
+    TARIF_PREMIUM: 0x6C9CE8,  # ko'k
+    TARIF_PLUS:    0x82E0A5,  # yashil
+}
+
+async def get_tarif_topic_id(bot, tarif: str) -> int | None:
+    """Tarif uchun forum topic ID."""
+    names = {
+        TARIF_VIP:     "👑 VIP Members",
+        TARIF_PREMIUM: "💎 Premium Members",
+        TARIF_PLUS:    "✨ PLUS Members",
+    }
+    if tarif not in names:
+        return None
+    color = TARIF_COLORS.get(tarif, 0x6FB9F0)
+    return await ensure_forum_topic(bot, names[tarif], f"tarif_{tarif}", color)
+
+async def get_backup_topic_id(bot) -> int | None:
+    return await ensure_forum_topic(bot, "📦 Backup", "backup", 0xFF6C6C)
+
+async def update_tarif_topic_json(bot, tarif: str):
+    """Tarif topic'idagi userlar JSON'ini yangilaydi (max 20 user/xabar)."""
+    if not SUPERGROUP_ID:
+        return
+    tid = await get_tarif_topic_id(bot, tarif)
+    if not tid:
+        return
+    users = load_users()
+    tarif_users = [u for u in users.values() if u.get("tarif") == tarif]
+
+    # 20 ta userga bo'lib JSON yozamiz
+    chunk_size = 20
+    for i in range(0, max(len(tarif_users), 1), chunk_size):
+        chunk = tarif_users[i:i+chunk_size]
+        data  = {"tarif": tarif, "chunk": i//chunk_size + 1, "users": chunk}
+        raw   = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
+        buf   = io.BytesIO(raw)
+        buf.name = f"{tarif}_users_{i//chunk_size + 1}.json"
+        try:
+            sent = await bot.send_document(
+                chat_id=SUPERGROUP_ID,
+                document=buf,
+                caption=f"📋 {TARIF_NAMES.get(tarif)} | {len(chunk)} ta user | chunk {i//chunk_size+1}",
+                message_thread_id=tid,
+            )
+            # Oxirgi chunkni pin qilamiz
+            if i + chunk_size >= len(tarif_users):
+                try:
+                    await bot.unpin_all_chat_messages(SUPERGROUP_ID)
+                except Exception:
+                    pass
+                try:
+                    await bot.pin_chat_message(
+                        SUPERGROUP_ID, sent.message_id, disable_notification=True)
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.warning(f"Tarif topic JSON yuborib bo'lmadi ({tarif}): {e}")
+
+async def create_class_topic(bot, class_name: str) -> int | None:
+    """Sinf uchun forum topic yaratadi. Masalan: '8A sinfi'"""
+    key = f"class_{class_name.lower().replace(' ', '_')}"
+    return await ensure_forum_topic(bot, class_name, key, 0x6FB9F0)
+
+# ══════════════════════════════════════════════════════
+#  EXPORT / BACKUP
+# ══════════════════════════════════════════════════════
+
+async def do_export(bot, to_backup_topic: bool = True) -> bool:
+    """Export qiladi — faqat supergroup backup topic'iga.
+    message_id config.json'da saqlanadi, restart'da o'sha orqali restore."""
+    if not SUPERGROUP_ID:
+        logger.warning("Export: SUPERGROUP_ID yo'q!")
+        return False
+    now    = datetime.now(TZ)
+    topics = all_topics()
+    data   = {
+        "export_version": EXPORT_VERSION,
+        "export_date":    now.strftime("%Y-%m-%d %H:%M:%S (Toshkent)"),
+        "admins":    load_admins(),
+        "chats":     load_chats(),
+        "config":    load_config(),
+        "badwords":  load_badwords(),
+        "users":     load_users(),
+        "topics":    topics,
+    }
+    raw = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
+    buf = io.BytesIO(raw)
+    buf.name = f"export_{now.strftime('%Y-%m-%d_%H-%M')}.json"
+    q_total = sum(len(t.get("questions", [])) for t in topics)
+    cap = (f"📦 *Lang Bot Export v{EXPORT_VERSION}*\n"
+           f"📅 {now.strftime('%Y-%m-%d %H:%M')}\n\n"
+           f"📚 Topiclar: {len(topics)}\n"
+           f"❓ Savollar: {q_total}\n"
+           f"👥 Adminlar: {len(data['admins'])}\n"
+           f"👤 Userlar: {len(data['users'])}\n"
+           f"💬 Chatlar: {len(data['chats'])}\n"
+           f"📦 Hajm: {len(raw)//1024} KB\n\n"
+           f"♻️ _Restart'da shu fayldan avtomatik tiklanadi_")
+    tid = await get_backup_topic_id(bot)
+    if not tid:
+        logger.error("Export: Backup topic ID topilmadi!")
+        return False
+    try:
+        sent = await bot.send_document(
+            chat_id=SUPERGROUP_ID,
+            document=buf,
+            caption=cap,
+            parse_mode="Markdown",
+            message_thread_id=tid,
+        )
+        # message_id ni config'ga saqlaymiz — restore uchun
+        cfg = load_config()
+        cfg["last_backup_msg_id"]      = sent.message_id
+        cfg["last_backup_thread_id"]   = tid
+        save_config(cfg)
+        # Supergroup'da pin qilamiz
+        try:
+            await bot.pin_chat_message(
+                SUPERGROUP_ID, sent.message_id, disable_notification=True)
+        except Exception as e:
+            logger.warning(f"Backup pin error: {e}")
+        logger.info(f"Export OK: msg_id={sent.message_id}, thread={tid}")
+        return True
+    except Exception as e:
+        logger.error(f"Export error: {e}")
+        return False
+
+async def auto_export(bot):
+    """Har o'zgarishda chaqiriladi."""
+    await do_export(bot, to_backup_topic=True)
+
+async def daily_export_job(context: ContextTypes.DEFAULT_TYPE):
+    logger.info("Daily export...")
+    await do_export(context.bot, to_backup_topic=True)
+
+async def apply_restore_data(data: dict) -> tuple[int, int, int, int]:
+    ac = cc = tc = uc = 0
+    if "admins"   in data: save_admins(data["admins"]);     ac = len(data["admins"])
+    if "chats"    in data: save_chats(data["chats"]);       cc = len(data["chats"])
+    if "config"   in data: save_config(data["config"])
+    if "badwords" in data: save_badwords(data["badwords"])
+    if "users"    in data: save_users(data["users"]);       uc = len(data["users"])
+    for t in data.get("topics", []):
+        if "name" in t: save_topic(t); tc += 1
+    return ac, cc, tc, uc
+
+async def _process_restore(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    doc = update.message.document
+    if not (doc.file_name or "").endswith(".json"):
+        await update.message.reply_text("❌ Faqat .json fayl.")
+        return
+    try:
+        tgf = await context.bot.get_file(doc.file_id)
+        raw = await tgf.download_as_bytearray()
+        data = json.loads(raw.decode("utf-8"))
+    except Exception as e:
+        await update.message.reply_text(f"❌ O'qib bo'lmadi:\n`{e}`",
+                                        parse_mode="Markdown")
+        return
+    if not data.get("export_version"):
+        await update.message.reply_text("❌ To'g'ri export fayli emas!")
+        return
+    ac, cc, tc, uc = await apply_restore_data(data)
+    context.user_data.clear()
+    await update.message.reply_text(
+        f"✅ *Tiklash muvaffaqiyatli!*\n\n"
+        f"📅 {data.get('export_date','?')}\n"
+        f"👥 {ac} admin | 💬 {cc} chat | 📚 {tc} topic | 👤 {uc} user",
+        parse_mode="Markdown")
+
+async def auto_restore_on_startup(bot) -> None:
+    """Restart'da config.json'dagi last_backup_msg_id orqali restore qiladi."""
+    cfg    = load_config()
+    msg_id = cfg.get("last_backup_msg_id")
+    if not msg_id:
+        logger.info("Auto-restore: oldingi backup topilmadi — bo'sh boshlanadi.")
+        return
+    if not SUPERGROUP_ID:
+        logger.warning("Auto-restore: SUPERGROUP_ID yo'q!")
+        return
+    try:
+        tgf_msg = await bot.forward_message(
+            chat_id=SUPERGROUP_ID,
+            from_chat_id=SUPERGROUP_ID,
+            message_id=msg_id,
+            disable_notification=True,
+        )
+        doc = tgf_msg.document if tgf_msg else None
+        if not doc:
+            # forward ishlamasa to'g'ridan get_file
+            raise Exception("forward qaytarmadi document")
+    except Exception:
+        # To'g'ridan file o'qish
+        try:
+            tgf = await bot.get_file(
+                (await bot.get_messages(SUPERGROUP_ID, msg_id)).document.file_id
+            )
+        except Exception as e:
+            logger.warning(f"Auto-restore: xabarni o'qib bo'lmadi: {e}")
+            # Fallback: copy_message orqali
+            try:
+                import tempfile, os as _os
+                fw = await bot.copy_message(
+                    chat_id=SUPERGROUP_ID,
+                    from_chat_id=SUPERGROUP_ID,
+                    message_id=msg_id,
+                )
+                logger.info(f"Auto-restore: copy msg={fw.message_id}")
+            except Exception as e2:
+                logger.warning(f"Auto-restore: to'liq muvaffaqiyatsiz: {e2}")
+            return
+    # Document orqali o'qish
+    try:
+        doc2 = doc if hasattr(doc, "file_id") else tgf_msg.document
+        tgf2 = await bot.get_file(doc2.file_id)
+        raw  = await tgf2.download_as_bytearray()
+        data = json.loads(raw.decode("utf-8"))
+    except Exception as e:
+        logger.warning(f"Auto-restore: faylni o'qib bo'lmadi: {e}")
+        return
+    if not data.get("export_version"):
+        logger.warning("Auto-restore: noto'g'ri format.")
+        return
+    ac, cc, tc, uc = await apply_restore_data(data)
+    logger.info(f"Auto-restore OK: {ac} admin, {cc} chat, {tc} topic, {uc} user")
+
+# ══════════════════════════════════════════════════════
+#  BROADCAST
+# ══════════════════════════════════════════════════════
+
+async def _bc_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["bc_chat"] = update.effective_chat.id
+    context.user_data["bc_msg"]  = update.message.message_id
+    context.user_data["step"]    = "broadcast_ready"
+    target = context.user_data.get("bc_target", "all")
+    chats  = load_chats()
+    count  = sum(1 for c in chats.values()
+                 if _matches(c["type"], target) and c["chat_id"] != SUPERADMIN)
+    kb = ReplyKeyboardMarkup([[BROADCAST_READY]], resize_keyboard=True, one_time_keyboard=True)
+    await update.message.reply_text(
+        f"📋 *Reklama tayyor!*\n🎯 {TARGET_NAMES.get(target, target)}\n"
+        f"👥 Taxminiy: *{count}* ta\n\n⬇️ Pastdagi tugmani bosing:",
+        parse_mode="Markdown", reply_markup=kb)
+
+async def _do_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    bc_chat = context.user_data.pop("bc_chat", None)
+    bc_msg  = context.user_data.pop("bc_msg",  None)
+    target  = context.user_data.pop("bc_target", "all")
+    context.user_data.clear()
+    if not bc_chat or not bc_msg:
+        await update.message.reply_text("❌ Reklama xabari topilmadi.",
+                                        reply_markup=ReplyKeyboardRemove())
+        return
+    chats = load_chats()
+    dest  = [c["chat_id"] for c in chats.values()
+             if _matches(c["type"], target) and c["chat_id"] != SUPERADMIN]
+    await update.message.reply_text(
+        f"⏳ *Yuborilmoqda...* {len(dest)} ta",
+        parse_mode="Markdown", reply_markup=ReplyKeyboardRemove())
+    s = f = 0
+    for cid in dest:
+        try:
+            await context.bot.copy_message(cid, bc_chat, bc_msg)
+            s += 1
+        except Exception as e:
+            logger.warning(f"BC {cid}: {e}")
+            f += 1
+        await asyncio.sleep(0.05)
+    await update.message.reply_text(
+        f"✅ *Reklama tugadi!*\n📨 {s} ta ✅ | {f} ta ❌",
+        parse_mode="Markdown")
+
+# ══════════════════════════════════════════════════════
+#  MEDIA PIN
+# ══════════════════════════════════════════════════════
+
+async def _pin_media(bot, mt: str, fi: str, caption: str = "") -> str | None:
+    """Media faylni supergroup backup topic'iga yuborib, barqaror file_id oladi."""
+    if not SUPERGROUP_ID:
+        return fi  # supergroup yo'q bo'lsa original file_id qaytaramiz
+    tid = await get_backup_topic_id(bot)
+    try:
+        if mt == "photo":
+            s = await bot.send_photo(SUPERGROUP_ID, fi, caption=caption[:1024],
+                                     message_thread_id=tid)
+            return s.photo[-1].file_id
+        if mt == "video":
+            s = await bot.send_video(SUPERGROUP_ID, fi, caption=caption[:1024],
+                                     message_thread_id=tid)
+            return s.video.file_id
+        if mt == "gif":
+            s = await bot.send_animation(SUPERGROUP_ID, fi, caption=caption[:1024],
+                                         message_thread_id=tid)
+            return s.animation.file_id
+        if mt == "sticker":
+            s = await bot.send_sticker(SUPERGROUP_ID, fi, message_thread_id=tid)
+            return s.sticker.file_id
+    except Exception as e:
+        logger.warning(f"pin_media ({mt}): {e}")
+    return fi
+
+# ══════════════════════════════════════════════════════
+#  SAVE QUESTION
+# ══════════════════════════════════════════════════════
+
+async def _save_q(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    tn  = context.user_data.get("topic_name")
+    t   = load_topic(tn)
+    if not t:
+        await update.message.reply_text("❌ Topic topilmadi.")
+        context.user_data.clear()
+        return
+    mq = get_admin_max_questions(uid)
+    if len(t["questions"]) >= mq:
+        await update.message.reply_text(f"❌ Limit: {mq} ta savol!")
+        context.user_data.clear()
+        return
+    mt = context.user_data.get("q_media_type", "none")
+    fi = context.user_data.get("q_file_id", None)
+    if mt != "none" and fi:
+        stable = await _pin_media(context.bot, mt, fi,
+                                  f"{tn} | {context.user_data.get('q_question','')}")
+        if stable:
+            fi = stable
+    q = {
+        "question":     context.user_data.get("q_question", ""),
+        "answer":       context.user_data.get("q_answer", ""),
+        "alternatives": context.user_data.get("q_alts", []),
+        "media_type":   mt,
+        "file_id":      fi,
+    }
+    t["questions"].append(q)
+    save_topic(t)
+    cnt = len(t["questions"])
+    for k in ("q_question", "q_answer", "q_alts", "q_media_type", "q_file_id"):
+        context.user_data.pop(k, None)
+    context.user_data["step"] = "addq_question"
+    icon = {"photo": "🖼", "video": "🎬", "gif": "🎞", "sticker": "🎭"}.get(mt, "📝")
+    kb = InlineKeyboardMarkup([
+        [IKB("➕ Yana savol", callback_data="addq_continue"),
+         IKB("⏹ Tugatish",   callback_data="addq_finish")],
+    ]) if cnt < mq else None
+    await update.message.reply_text(
+        f"✅ *Savol saqlandi!* {icon}\n📊 {t['emoji']} {tn}: {cnt}/{mq}",
+        parse_mode="Markdown", reply_markup=kb)
+    # Auto backup
+    asyncio.create_task(auto_export(context.bot))
+
+# ══════════════════════════════════════════════════════
+#  GAME
+# ══════════════════════════════════════════════════════
+
+async def send_question(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
+    g = get_game(chat_id)
+    if not g["active"]:
+        return
+    if g["asked"] >= len(g["questions"]):
+        await finish_game(chat_id, context)
+        return
+    q = g["questions"][g["asked"]]
+    g["asked"] += 1
+    g["current"] = q
+    cap = (f"{g['emoji']} *Savol {g['asked']}/{len(g['questions'])}*\n\n"
+           f"❓ {q['question']}\n\n↩️ Reply qilib javob bering:")
+    mt = q.get("media_type", "none")
+    fi = q.get("file_id")
+    try:
+        if mt == "photo" and fi:
+            sent = await context.bot.send_photo(chat_id, fi, caption=cap, parse_mode="Markdown")
+        elif mt == "video" and fi:
+            sent = await context.bot.send_video(chat_id, fi, caption=cap, parse_mode="Markdown")
+        elif mt == "gif" and fi:
+            sent = await context.bot.send_animation(chat_id, fi, caption=cap, parse_mode="Markdown")
+        elif mt == "sticker" and fi:
+            await context.bot.send_sticker(chat_id, fi)
+            sent = await context.bot.send_message(chat_id, cap, parse_mode="Markdown")
+        else:
+            sent = await context.bot.send_message(chat_id, cap, parse_mode="Markdown")
+        g["current_msg_id"] = sent.message_id
+    except Exception as e:
+        logger.error(f"send_question: {e}")
+
+async def _check_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    cid = update.effective_chat.id
+    g   = get_game(cid)
+    if not g["active"] or g["current"] is None or g["waiting"]:
+        return
+    reply = update.message.reply_to_message
+    if reply is None or reply.message_id != g["current_msg_id"]:
+        return
+    user    = update.effective_user
+    uid_s   = str(user.id)
+    raw_nm  = user.first_name or "Anonim"
+    dname   = get_display_name(user.id, raw_nm)
+    ans     = update.message.text.strip().lower()
+    correct = g["current"]["answer"].lower()
+    alts    = [a.lower() for a in g["current"].get("alternatives", [])]
+    ok      = (ans == correct or ans in alts)
+    g["waiting"] = True
+    if ok:
+        if uid_s not in g["scores"]:
+            g["scores"][uid_s] = {"name": raw_nm, "count": 0}
+        g["scores"][uid_s]["count"] += 1
+        ball = g["scores"][uid_s]["count"]
+        await update.message.reply_text(
+            f"✅ *TO'G'RI!* 🎉\n👤 {dname}: {ball} ball\n\n⏩ Keyingi...",
+            parse_mode="Markdown")
+    else:
+        alt_t = f"\n➕ Shuningdek: _{', '.join(alts)}_" if alts else ""
+        await update.message.reply_text(
+            f"❌ *XATO!*\n✅ To'g'ri: *{correct}*{alt_t}\n\n⏩ Keyingi...",
+            parse_mode="Markdown")
+    g["waiting"] = False
+    if g["asked"] >= len(g["questions"]):
+        await finish_game(cid, context)
+    else:
+        await send_question(cid, context)
+
+async def finish_game(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
+    g = get_game(chat_id)
+    g["active"] = False
+    t = load_topic(g["topic"]) if g["topic"] else None
+    if not g["scores"]:
+        await context.bot.send_message(
+            chat_id, "📊 *O'yin tugadi!* Hech kim to'g'ri javob bermadi.",
+            parse_mode="Markdown")
+        return
+    ss      = sorted(g["scores"].items(), key=lambda x: x[1]["count"], reverse=True)
+    max_sc  = ss[0][1]["count"]
+    medals  = ["🥇", "🥈", "🥉"]
+    winners = [get_display_name(int(uid_s), d["name"]) for uid_s, d in ss
+               if d["count"] == max_sc]
+    hdr = (f"🏆 *G'OLIB: {winners[0]}* 🏆" if len(winners) == 1
+           else f"🏆 *G'OLIBLAR: {', '.join(winners)}* 🏆")
+    res = f"{hdr}\n📊 {max_sc}/{len(g['questions'])}\n\n📋 *Natijalar:*\n"
+    for i, (uid_s, d) in enumerate(ss[:10]):
+        m  = medals[i] if i < 3 else f"{i+1}."
+        dn = get_display_name(int(uid_s), d["name"])
+        res += f"{m} {dn}: {d['count']} ball\n"
+    prize = t.get("prize") if t else None
+    try:
+        if prize:
+            pt, fi = prize["type"], prize["file_id"]
+            if pt == "photo":
+                await context.bot.send_photo(chat_id, photo=fi, caption=res, parse_mode="Markdown")
+            elif pt == "gif":
+                await context.bot.send_animation(chat_id, animation=fi, caption=res, parse_mode="Markdown")
+            elif pt == "sticker":
+                await context.bot.send_sticker(chat_id, sticker=fi)
+                await context.bot.send_message(chat_id, res, parse_mode="Markdown")
+        else:
+            await context.bot.send_message(chat_id, res, parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"finish_game: {e}")
+        await context.bot.send_message(chat_id, res, parse_mode="Markdown")
+    g["scores"] = {}
+
+# ══════════════════════════════════════════════════════
+#  ADDADMIN FINALIZE
+# ══════════════════════════════════════════════════════
+
+async def _finalize_addadmin(q, context: ContextTypes.DEFAULT_TYPE,
+                              added_by: int, display_name, can_add: bool, sub_s: dict):
+    pa      = context.user_data
+    new_uid = pa.get("aa_uid")
+    tlim    = pa.get("aa_tl")
+    mq      = pa.get("aa_mq")
+    context.user_data.clear()
+    if not new_uid or not tlim or not mq:
+        await q.edit_message_text("❌ Ma'lumotlar to'liq emas.")
+        return
+    adm = load_admins()
+    if str(new_uid) in adm:
+        await q.edit_message_text(f"⚠️ `{new_uid}` allaqachon admin!", parse_mode="Markdown")
+        return
+    entry = {"topic_limit": tlim, "max_questions": mq, "added_by": added_by}
+    if display_name:
+        entry["display_name"] = display_name
+    if can_add:
+        entry["can_add_admins"]     = True
+        entry["sub_admin_settings"] = sub_s
+    adm[str(new_uid)] = entry
+    save_admins(adm)
+    ca_str = ""
+    if can_add:
+        ca_str = (f"\n👥 Admin qo'sha oladi: ✅"
+                  f"\n   Max sub-admin: {sub_s.get('max_admins','?')}"
+                  f"\n   Sub-admin topic: {sub_s.get('max_topic_limit','?')}"
+                  f"\n   Sub-admin savol: {sub_s.get('max_questions_per_topic','?')}")
+    dn_str = f"\n🏷 Nom: {display_name}" if display_name else ""
+    await q.edit_message_text(
+        f"✅ *Admin qo'shildi!*\n\n"
+        f"👤 UID: `{new_uid}`\n"
+        f"📁 Topic limiti: {tlim} ta\n"
+        f"❓ Savol limiti: {mq} ta/topic{dn_str}{ca_str}\n\n"
+        f"Jami adminlar: {len(adm)} ta",
+        parse_mode="Markdown")
+    asyncio.create_task(auto_export(context.application.bot))
+
+# ══════════════════════════════════════════════════════
+#  RELAY
+# ══════════════════════════════════════════════════════
+
+async def _relay(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    hdr  = (f"📨 *Foydalanuvchidan:*\n"
+            f"👤 [{user.first_name}](tg://user?id={user.id}) | `{user.id}`"
+            + (f" | @{user.username}" if user.username else ""))
+    try:
+        await context.bot.send_message(SUPERADMIN, hdr, parse_mode="Markdown")
+        await context.bot.forward_message(
+            SUPERADMIN, update.effective_chat.id, update.message.message_id)
+    except Exception as e:
+        logger.error(f"relay: {e}")
+    context.user_data.clear()
+    await update.message.reply_text(
+        "✅ Xabar yetkazildi! _(hech qayerda saqlanmadi)_",
+        parse_mode="Markdown")
 
 # ══════════════════════════════════════════════════════
 #  KEYBOARDS
@@ -484,630 +1262,87 @@ def _editadmin_txt(uid_e: int, info: dict) -> str:
             f"📁 *Topic limiti o'zgartirish:*\n"
             f"❓ *Savol limiti o'zgartirish:*")
 
-# ══════════════════════════════════════════════════════
-#  EXPORT / RESTORE
-# ══════════════════════════════════════════════════════
+# ── Superadmin asosiy menyu ──
+def _superadmin_main_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [IKB("📁 Topiclar",     callback_data="menu:topics"),
+         IKB("👥 Adminlar",     callback_data="menu:admins")],
+        [IKB("👤 Userlar",      callback_data="menu:users"),
+         IKB("💎 Tariflar",     callback_data="menu:tarifs")],
+        [IKB("🎮 O'yinlar",     callback_data="menu:games"),
+         IKB("🔤 So'z filtri",  callback_data="menu:badwords")],
+        [IKB("📢 Reklama",      callback_data="menu:broadcast"),
+         IKB("⚙️ Sozlamalar",   callback_data="menu:settings")],
+        [IKB("📦 Export",       callback_data="menu:export"),
+         IKB("🏫 Forum Topic",  callback_data="menu:forum")],
+    ])
 
-async def do_export(bot) -> bool:
-    now    = datetime.now(TZ)
-    topics = all_topics()
-    data   = {
-        "export_version": EXPORT_VERSION,
-        "export_date":    now.strftime("%Y-%m-%d %H:%M:%S (Toshkent)"),
-        "admins":    load_admins(),
-        "chats":     load_chats(),
-        "config":    load_config(),
-        "badwords":  load_badwords(),
-        "topics":    topics,
-    }
-    raw = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
-    buf = io.BytesIO(raw)
-    buf.name = f"export_{now.strftime('%Y-%m-%d_%H-%M')}.json"
-    q_total = sum(len(t.get("questions", [])) for t in topics)
-    cap = (f"📦 *Lang Bot Export v{EXPORT_VERSION}*\n"
-           f"📅 {now.strftime('%Y-%m-%d %H:%M')}\n\n"
-           f"📚 Topiclar: {len(topics)}\n"
-           f"❓ Savollar: {q_total}\n"
-           f"👥 Adminlar: {len(data['admins'])}\n"
-           f"💬 Chatlar: {len(data['chats'])}\n"
-           f"📦 Hajm: {len(raw)//1024} KB\n\n"
-           f"♻️ _Restart'da shu fayldan avtomatik tiklanadi_")
-    try:
-        sent = await bot.send_document(chat_id=EXPORT_CHANNEL,
-                                document=buf, caption=cap, parse_mode="Markdown")
-        # Eng so'nggi eksportni pin qilamiz — bot restart bo'lganda
-        # avtomatik tiklash aynan shu pin qilingan xabardan o'qiladi.
-        try:
-            await bot.unpin_all_chat_messages(EXPORT_CHANNEL)
-        except Exception:
-            pass
-        try:
-            await bot.pin_chat_message(
-                EXPORT_CHANNEL, sent.message_id, disable_notification=True)
-        except Exception as e:
-            logger.warning(f"Export pin error: {e}")
-        return True
-    except Exception as e:
-        logger.error(f"Export error: {e}")
-        return False
-
-async def daily_export_job(context: ContextTypes.DEFAULT_TYPE):
-    logger.info("Daily export...")
-    await do_export(context.bot)
-
-async def apply_restore_data(data: dict) -> tuple[int, int, int]:
-    """Export JSON ma'lumotlarini diskka yozadi.
-    Qaytaradi: (admin soni, chat soni, topic soni)."""
-    ac = cc = tc = 0
-    if "admins"   in data: save_admins(data["admins"]);     ac = len(data["admins"])
-    if "chats"    in data: save_chats(data["chats"]);       cc = len(data["chats"])
-    if "config"   in data: save_config(data["config"])
-    if "badwords" in data: save_badwords(data["badwords"])
-    for t in data.get("topics", []):
-        if "name" in t: save_topic(t); tc += 1
-    return ac, cc, tc
-
-async def _process_restore(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    doc = update.message.document
-    if not (doc.file_name or "").endswith(".json"):
-        await update.message.reply_text("❌ Faqat .json fayl.")
-        return
-    try:
-        tgf = await context.bot.get_file(doc.file_id)
-        raw = await tgf.download_as_bytearray()
-        data = json.loads(raw.decode("utf-8"))
-    except Exception as e:
-        await update.message.reply_text(f"❌ O'qib bo'lmadi:\n`{e}`",
-                                        parse_mode="Markdown")
-        return
-    if not data.get("export_version"):
-        await update.message.reply_text("❌ To'g'ri export fayli emas!")
-        return
-    ac, cc, tc = await apply_restore_data(data)
-    context.user_data.clear()
-    await update.message.reply_text(
-        f"✅ *Tiklash muvaffaqiyatli!*\n\n"
-        f"📅 {data.get('export_date','?')}\n"
-        f"👥 {ac} admin | 💬 {cc} chat | 📚 {tc} topic",
-        parse_mode="Markdown")
-
-async def auto_restore_on_startup(bot) -> None:
-    """Bot ishga tushganda EXPORT_CHANNEL'dagi PIN qilingan oxirgi
-    eksport faylidan ma'lumotlarni avtomatik tiklaydi.
-    Render kabi platformalarda disk har restart'da tozalanadi —
-    shuning uchun bu funksiya avvalgi holatni qaytaradi."""
-    try:
-        chat = await bot.get_chat(EXPORT_CHANNEL)
-    except Exception as e:
-        logger.warning(f"Auto-restore: kanalni o'qib bo'lmadi ({e}). "
-                       f"Bot zahira kanalida ADMIN ekanligini tekshiring.")
-        return
-
-    pinned = chat.pinned_message
-    if not pinned or not pinned.document:
-        logger.info("Auto-restore: pin qilingan zahira topilmadi — "
-                    "bo'sh holatda boshlanadi.")
-        return
-
-    doc = pinned.document
-    if not (doc.file_name or "").endswith(".json"):
-        logger.info("Auto-restore: pin qilingan fayl .json emas, o'tkazib yuborildi.")
-        return
-
-    try:
-        tgf  = await bot.get_file(doc.file_id)
-        raw  = await tgf.download_as_bytearray()
-        data = json.loads(raw.decode("utf-8"))
-    except Exception as e:
-        logger.warning(f"Auto-restore: faylni o'qib bo'lmadi: {e}")
-        return
-
-    if not data.get("export_version"):
-        logger.warning("Auto-restore: noto'g'ri export fayli, o'tkazib yuborildi.")
-        return
-
-    ac, cc, tc = await apply_restore_data(data)
-    logger.info(
-        f"Auto-restore tugadi: {ac} admin, {cc} chat, {tc} topic "
-        f"(eksport sanasi: {data.get('export_date', '?')})")
-
-# ══════════════════════════════════════════════════════
-#  BROADCAST
-# ══════════════════════════════════════════════════════
-
-async def _bc_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["bc_chat"] = update.effective_chat.id
-    context.user_data["bc_msg"]  = update.message.message_id
-    context.user_data["step"]    = "broadcast_ready"
-    target = context.user_data.get("bc_target", "all")
-    chats  = load_chats()
-    count  = sum(1 for c in chats.values()
-                 if _matches(c["type"], target) and c["chat_id"] != SUPERADMIN)
-    kb = ReplyKeyboardMarkup([[BROADCAST_READY]], resize_keyboard=True, one_time_keyboard=True)
-    await update.message.reply_text(
-        f"📋 *Reklama tayyor!*\n🎯 {TARGET_NAMES.get(target, target)}\n"
-        f"👥 Taxminiy: *{count}* ta\n\n⬇️ Pastdagi tugmani bosing:",
-        parse_mode="Markdown", reply_markup=kb)
-
-async def _do_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    bc_chat = context.user_data.pop("bc_chat", None)
-    bc_msg  = context.user_data.pop("bc_msg",  None)
-    target  = context.user_data.pop("bc_target", "all")
-    context.user_data.clear()
-    if not bc_chat or not bc_msg:
-        await update.message.reply_text("❌ Reklama xabari topilmadi.",
-                                        reply_markup=ReplyKeyboardRemove())
-        return
-    chats = load_chats()
-    dest  = [c["chat_id"] for c in chats.values()
-             if _matches(c["type"], target) and c["chat_id"] != SUPERADMIN]
-    await update.message.reply_text(
-        f"⏳ *Yuborilmoqda...* {len(dest)} ta",
-        parse_mode="Markdown", reply_markup=ReplyKeyboardRemove())
-    s = f = 0
-    for cid in dest:
-        try:
-            await context.bot.copy_message(cid, bc_chat, bc_msg)
-            s += 1
-        except Exception as e:
-            logger.warning(f"BC {cid}: {e}")
-            f += 1
-        await asyncio.sleep(0.05)
-    await update.message.reply_text(
-        f"✅ *Reklama tugadi!*\n📨 {s} ta ✅ | {f} ta ❌",
-        parse_mode="Markdown")
-
-# ══════════════════════════════════════════════════════
-#  MEDIA PIN (savol mediani kanalga pin qilish)
-# ══════════════════════════════════════════════════════
-
-async def _pin_media(bot, mt: str, fi: str, caption: str = "") -> str | None:
-    try:
-        if mt == "photo":
-            s = await bot.send_photo(EXPORT_CHANNEL, fi, caption=caption[:1024])
-            return s.photo[-1].file_id
-        if mt == "video":
-            s = await bot.send_video(EXPORT_CHANNEL, fi, caption=caption[:1024])
-            return s.video.file_id
-        if mt == "gif":
-            s = await bot.send_animation(EXPORT_CHANNEL, fi, caption=caption[:1024])
-            return s.animation.file_id
-        if mt == "sticker":
-            s = await bot.send_sticker(EXPORT_CHANNEL, fi)
-            return s.sticker.file_id
-    except Exception as e:
-        logger.warning(f"pin_media ({mt}): {e}")
-    return None
-
-# ══════════════════════════════════════════════════════
-#  SAVE QUESTION
-# ══════════════════════════════════════════════════════
-
-async def _save_q(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    tn  = context.user_data.get("topic_name")
-    t   = load_topic(tn)
-    if not t:
-        await update.message.reply_text("❌ Topic topilmadi.")
-        context.user_data.clear()
-        return
-    mq = get_admin_max_questions(uid)
-    if len(t["questions"]) >= mq:
-        await update.message.reply_text(f"❌ Limit: {mq} ta savol!")
-        context.user_data.clear()
-        return
-
-    mt = context.user_data.get("q_media_type", "none")
-    fi = context.user_data.get("q_file_id", None)
-
-    # Mediasini export kanalga pin qil → barqaror file_id olamiz
-    if mt != "none" and fi:
-        stable = await _pin_media(context.bot, mt, fi,
-                                  f"{tn} | {context.user_data.get('q_question','')}")
-        if stable:
-            fi = stable
-
-    q = {
-        "question":     context.user_data.get("q_question", ""),
-        "answer":       context.user_data.get("q_answer", ""),
-        "alternatives": context.user_data.get("q_alts", []),
-        "media_type":   mt,
-        "file_id":      fi,
-    }
-    t["questions"].append(q)
-    save_topic(t)
-    cnt = len(t["questions"])
-
-    for k in ("q_question", "q_answer", "q_alts", "q_media_type", "q_file_id"):
-        context.user_data.pop(k, None)
-    context.user_data["step"] = "addq_question"
-
-    icon = {"photo": "🖼", "video": "🎬", "gif": "🎞", "sticker": "🎭"}.get(mt, "📝")
-    kb = InlineKeyboardMarkup([
-        [IKB("➕ Yana savol", callback_data="addq_continue"),
-         IKB("⏹ Tugatish",   callback_data="addq_finish")],
-    ]) if cnt < mq else None
-    await update.message.reply_text(
-        f"✅ *Savol saqlandi!* {icon}\n📊 {t['emoji']} {tn}: {cnt}/{mq}",
-        parse_mode="Markdown", reply_markup=kb)
-
-# ══════════════════════════════════════════════════════
-#  GAME
-# ══════════════════════════════════════════════════════
-
-async def send_question(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
-    g = get_game(chat_id)
-    if not g["active"]:
-        return
-    if g["asked"] >= len(g["questions"]):
-        await finish_game(chat_id, context)
-        return
-    q = g["questions"][g["asked"]]
-    g["asked"] += 1
-    g["current"] = q
-    cap = (f"{g['emoji']} *Savol {g['asked']}/{len(g['questions'])}*\n\n"
-           f"❓ {q['question']}\n\n↩️ Reply qilib javob bering:")
-    mt = q.get("media_type", "none")
-    fi = q.get("file_id")
-    try:
-        if mt == "photo" and fi:
-            sent = await context.bot.send_photo(chat_id, fi, caption=cap, parse_mode="Markdown")
-        elif mt == "video" and fi:
-            sent = await context.bot.send_video(chat_id, fi, caption=cap, parse_mode="Markdown")
-        elif mt == "gif" and fi:
-            sent = await context.bot.send_animation(chat_id, fi, caption=cap, parse_mode="Markdown")
-        elif mt == "sticker" and fi:
-            await context.bot.send_sticker(chat_id, fi)
-            sent = await context.bot.send_message(chat_id, cap, parse_mode="Markdown")
-        else:
-            sent = await context.bot.send_message(chat_id, cap, parse_mode="Markdown")
-        g["current_msg_id"] = sent.message_id
-    except Exception as e:
-        logger.error(f"send_question: {e}")
-
-async def _check_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    cid = update.effective_chat.id
-    g   = get_game(cid)
-    if not g["active"] or g["current"] is None or g["waiting"]:
-        return
-    reply = update.message.reply_to_message
-    if reply is None or reply.message_id != g["current_msg_id"]:
-        return
-    user    = update.effective_user
-    uid_s   = str(user.id)
-    raw_nm  = user.first_name or "Anonim"
-    dname   = get_display_name(user.id, raw_nm)
-    ans     = update.message.text.strip().lower()
-    correct = g["current"]["answer"].lower()
-    alts    = [a.lower() for a in g["current"].get("alternatives", [])]
-    ok      = (ans == correct or ans in alts)
-    g["waiting"] = True
-    if ok:
-        if uid_s not in g["scores"]:
-            g["scores"][uid_s] = {"name": raw_nm, "count": 0}
-        g["scores"][uid_s]["count"] += 1
-        ball = g["scores"][uid_s]["count"]
-        await update.message.reply_text(
-            f"✅ *TO'G'RI!* 🎉\n👤 {dname}: {ball} ball\n\n⏩ Keyingi...",
-            parse_mode="Markdown")
-    else:
-        alt_t = f"\n➕ Shuningdek: _{', '.join(alts)}_" if alts else ""
-        await update.message.reply_text(
-            f"❌ *XATO!*\n✅ To'g'ri: *{correct}*{alt_t}\n\n⏩ Keyingi...",
-            parse_mode="Markdown")
-    g["waiting"] = False
-    if g["asked"] >= len(g["questions"]):
-        await finish_game(cid, context)
-    else:
-        await send_question(cid, context)
-
-async def finish_game(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
-    g = get_game(chat_id)
-    g["active"] = False
-    t = load_topic(g["topic"]) if g["topic"] else None
-    if not g["scores"]:
-        await context.bot.send_message(
-            chat_id, "📊 *O'yin tugadi!* Hech kim to'g'ri javob bermadi.",
-            parse_mode="Markdown")
-        return
-    ss      = sorted(g["scores"].items(), key=lambda x: x[1]["count"], reverse=True)
-    max_sc  = ss[0][1]["count"]
-    medals  = ["🥇", "🥈", "🥉"]
-
-    winners = []
-    for uid_s, d in ss:
-        if d["count"] == max_sc:
-            winners.append(get_display_name(int(uid_s), d["name"]))
-
-    hdr = (f"🏆 *G'OLIB: {winners[0]}* 🏆" if len(winners) == 1
-           else f"🏆 *G'OLIBLAR: {', '.join(winners)}* 🏆")
-    res = f"{hdr}\n📊 {max_sc}/{len(g['questions'])}\n\n📋 *Natijalar:*\n"
-    for i, (uid_s, d) in enumerate(ss[:10]):
-        m  = medals[i] if i < 3 else f"{i+1}."
-        dn = get_display_name(int(uid_s), d["name"])
-        res += f"{m} {dn}: {d['count']} ball\n"
-
-    prize = t.get("prize") if t else None
-    try:
-        if prize:
-            pt, fi = prize["type"], prize["file_id"]
-            if pt == "photo":
-                await context.bot.send_photo(chat_id, photo=fi, caption=res, parse_mode="Markdown")
-            elif pt == "gif":
-                await context.bot.send_animation(chat_id, animation=fi, caption=res, parse_mode="Markdown")
-            elif pt == "sticker":
-                await context.bot.send_sticker(chat_id, sticker=fi)
-                await context.bot.send_message(chat_id, res, parse_mode="Markdown")
-        else:
-            await context.bot.send_message(chat_id, res, parse_mode="Markdown")
-    except Exception as e:
-        logger.error(f"finish_game: {e}")
-        await context.bot.send_message(chat_id, res, parse_mode="Markdown")
-    g["scores"] = {}
-
-# ══════════════════════════════════════════════════════
-#  ADDADMIN FINALIZE
-# ══════════════════════════════════════════════════════
-
-async def _finalize_addadmin(q, context: ContextTypes.DEFAULT_TYPE,
-                              added_by: int, display_name, can_add: bool, sub_s: dict):
-    pa      = context.user_data
-    new_uid = pa.get("aa_uid")
-    tlim    = pa.get("aa_tl")
-    mq      = pa.get("aa_mq")
-    context.user_data.clear()
-
-    if not new_uid or not tlim or not mq:
-        await q.edit_message_text("❌ Ma'lumotlar to'liq emas. /addadmin")
-        return
-
+def _admin_main_kb(uid: int) -> InlineKeyboardMarkup:
     adm = load_admins()
-    if str(new_uid) in adm:
-        await q.edit_message_text(f"⚠️ `{new_uid}` allaqachon admin!", parse_mode="Markdown")
-        return
+    info = adm.get(str(uid), {})
+    rows = [
+        [IKB("📁 Topiclarim",   callback_data="menu:topics"),
+         IKB("📝 Savol qo'sh",  callback_data="menu:addq")],
+        [IKB("🎮 O'yin boshlash", callback_data="menu:newgame")],
+    ]
+    if info.get("can_add_admins"):
+        rows.append([IKB("👥 Sub-adminlar", callback_data="menu:admins")])
+    return InlineKeyboardMarkup(rows)
 
-    entry = {
-        "topic_limit":   tlim,
-        "max_questions": mq,
-        "added_by":      added_by,
-    }
-    if display_name:
-        entry["display_name"] = display_name
-    if can_add:
-        entry["can_add_admins"]       = True
-        entry["sub_admin_settings"]   = sub_s
+def _user_main_kb(uid: int) -> InlineKeyboardMarkup:
+    tarif = get_user_tarif(uid)
+    rows = [
+        [IKB("💎 Tarifim",        callback_data="u:tarif"),
+         IKB("👥 Referallarim",   callback_data="u:referral")],
+        [IKB("📋 Topiclarim",     callback_data="u:topics"),
+         IKB("📨 Adminга murojaat", callback_data="u:contact")],
+    ]
+    if tarif == TARIF_FREE:
+        rows.append([IKB("🛒 Tarif sotib olish", callback_data="u:buy")])
+    return InlineKeyboardMarkup(rows)
 
-    adm[str(new_uid)] = entry
-    save_admins(adm)
+def _buy_tarif_kb() -> InlineKeyboardMarkup:
+    prices = get_tarif_prices()
+    return InlineKeyboardMarkup([
+        [IKB(f"✨ PLUS — {prices[TARIF_PLUS]} ⭐",       callback_data=f"buy:{TARIF_PLUS}")],
+        [IKB(f"💎 Premium — {prices[TARIF_PREMIUM]} ⭐", callback_data=f"buy:{TARIF_PREMIUM}")],
+        [IKB(f"👑 VIP — {prices[TARIF_VIP]} ⭐",        callback_data=f"buy:{TARIF_VIP}")],
+        [IKB("❌ Bekor", callback_data="u:back")],
+    ])
 
-    ca_str = ""
-    if can_add:
-        ca_str = (f"\n👥 Admin qo'sha oladi: ✅"
-                  f"\n   Max sub-admin: {sub_s.get('max_admins','?')}"
-                  f"\n   Sub-admin topic: {sub_s.get('max_topic_limit','?')}"
-                  f"\n   Sub-admin savol: {sub_s.get('max_questions_per_topic','?')}")
-    dn_str = f"\n🏷 Nom: {display_name}" if display_name else ""
-
-    await q.edit_message_text(
-        f"✅ *Admin qo'shildi!*\n\n"
-        f"👤 UID: `{new_uid}`\n"
-        f"📁 Topic limiti: {tlim} ta\n"
-        f"❓ Savol limiti: {mq} ta/topic{dn_str}{ca_str}\n\n"
-        f"Jami adminlar: {len(adm)} ta",
-        parse_mode="Markdown")
-
-# ══════════════════════════════════════════════════════
-#  RELAY (contact)
-# ══════════════════════════════════════════════════════
-
-async def _relay(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    hdr  = (f"📨 *Foydalanuvchidan:*\n"
-            f"👤 [{user.first_name}](tg://user?id={user.id}) | `{user.id}`"
-            + (f" | @{user.username}" if user.username else ""))
-    try:
-        await context.bot.send_message(SUPERADMIN, hdr, parse_mode="Markdown")
-        await context.bot.forward_message(
-            SUPERADMIN, update.effective_chat.id, update.message.message_id)
-    except Exception as e:
-        logger.error(f"relay: {e}")
-    context.user_data.clear()
-    await update.message.reply_text(
-        "✅ Xabar yetkazildi! _(hech qayerda saqlanmadi)_",
-        parse_mode="Markdown")
+def _tarif_admin_kb() -> InlineKeyboardMarkup:
+    prices = get_tarif_prices()
+    return InlineKeyboardMarkup([
+        [IKB(f"✨ PLUS narxi: {prices[TARIF_PLUS]} ⭐",       callback_data=f"setprice:{TARIF_PLUS}")],
+        [IKB(f"💎 Premium narxi: {prices[TARIF_PREMIUM]} ⭐", callback_data=f"setprice:{TARIF_PREMIUM}")],
+        [IKB(f"👑 VIP narxi: {prices[TARIF_VIP]} ⭐",        callback_data=f"setprice:{TARIF_VIP}")],
+        [IKB("📢 Obuna kanali o'zgartirish",                  callback_data="setchannel")],
+        [IKB("⬅️ Orqaga", callback_data="menu:back")],
+    ])
 
 # ══════════════════════════════════════════════════════
-#  SENDAS / REQUIREADMIN / BADWORDS COMMANDS
-# ══════════════════════════════════════════════════════
-
-async def cmd_sendas(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Botdan guruhga xabar yozish."""
-    if not is_superadmin(update.effective_user.id):
-        return
-    chats  = load_chats()
-    groups = {k: v for k, v in chats.items()
-              if v.get("type") in ("group", "supergroup")}
-    if not groups:
-        await update.message.reply_text("❌ Ro'yxatda guruh yo'q.")
-        return
-    btns = [[IKB(v.get("name", k), callback_data=f"sendas:{k}")]
-            for k, v in groups.items()]
-    await update.message.reply_text(
-        "📤 *Botdan xabar yuborish*\n\nQaysi guruhga?",
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(btns))
-
-
-async def cmd_requireadmin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Guruhda bot admin bo'lishini talab qilish."""
-    if not is_superadmin(update.effective_user.id):
-        return
-    chats  = load_chats()
-    groups = {k: v for k, v in chats.items()
-              if v.get("type") in ("group", "supergroup")}
-    if not groups:
-        await update.message.reply_text("❌ Guruh yo'q.")
-        return
-    btns = []
-    for k, v in groups.items():
-        req = v.get("require_admin", False)
-        s   = "🟢" if req else "🔴"
-        btns.append([IKB(f"{s} {v.get('name', k)}", callback_data=f"req_adm:{k}")])
-    btns.append([IKB("✅ Tayyor", callback_data="req_adm_done")])
-    await update.message.reply_text(
-        "🔐 *Guruhlar — Admin talab:*\n\n"
-        "🟢 YONIQ — bot admin bo'lmasa ishlamaydi\n"
-        "🔴 O'CHIQ — har holda ishlaydi\n\n"
-        "Bosib yoqing/o'chiring:",
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(btns))
-
-
-async def cmd_addbadword(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_superadmin(update.effective_user.id): return
-    args = context.args
-    if not args:
-        await update.message.reply_text(
-            "❌ Format: `/addbadword so'z`\n"
-            "_(Xabar o'chirilib, ogohlantirish yuboriladi)_",
-            parse_mode="Markdown"); return
-    word = " ".join(args).lower().strip()
-    bw   = load_badwords()
-    if word in bw["words"] or word in bw["severe_words"]:
-        await update.message.reply_text(f"⚠️ `{word}` allaqachon ro'yxatda!",
-                                        parse_mode="Markdown"); return
-    bw["words"].append(word)
-    save_badwords(bw)
-    await update.message.reply_text(
-        f"✅ So'z qo'shildi: `{word}`\n_(O'chirish + ogohlantirish)_",
-        parse_mode="Markdown")
-
-
-async def cmd_addsevereword(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_superadmin(update.effective_user.id): return
-    args = context.args
-    if not args:
-        await update.message.reply_text(
-            "❌ Format: `/addsevereword so'z`\n"
-            "_(User bo'lsa: chiqarib yuborish + ogohlantirish + sizga xabar)_\n"
-            "_(Admin bo'lsa: o'chirish + ogohlantirish + sizga xabar)_",
-            parse_mode="Markdown"); return
-    word = " ".join(args).lower().strip()
-    bw   = load_badwords()
-    if word in bw["severe_words"]:
-        await update.message.reply_text(f"⚠️ `{word}` allaqachon juda qo'pol ro'yxatda!",
-                                        parse_mode="Markdown"); return
-    if word in bw["words"]:
-        bw["words"].remove(word)
-    bw["severe_words"].append(word)
-    save_badwords(bw)
-    await update.message.reply_text(
-        f"🚫 Juda qo'pol so'z qo'shildi: `{word}`",
-        parse_mode="Markdown")
-
-
-async def cmd_addwarning(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_superadmin(update.effective_user.id): return
-    args = context.args
-    if not args:
-        await update.message.reply_text(
-            "❌ Format: `/addwarning Matn kiriting yoshbola!`\n"
-            "_(Bot ogohlantirish berganida tasodifiy tanlaydi)_",
-            parse_mode="Markdown"); return
-    text = " ".join(args)
-    bw   = load_badwords()
-    bw["warnings"].append(text)
-    save_badwords(bw)
-    await update.message.reply_text(
-        f"✅ Ogohlantirish qo'shildi:\n\n💬 _{text}_",
-        parse_mode="Markdown")
-
-
-async def cmd_listbadwords(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_superadmin(update.effective_user.id): return
-    bw      = load_badwords()
-    words   = bw.get("words", [])
-    severe  = bw.get("severe_words", [])
-    warns   = bw.get("warnings", [])
-
-    msg = "🔤 *So'z filtri:*\n\n"
-    if words:
-        msg += f"⚠️ *Oddiy so'zlar ({len(words)} ta):*\n"
-        msg += "\n".join(f"• `{w}`" for w in words) + "\n\n"
-    else:
-        msg += "⚠️ Oddiy so'zlar yo'q.\n\n"
-
-    if severe:
-        msg += f"🚫 *Juda qo'pol so'zlar ({len(severe)} ta):*\n"
-        msg += "\n".join(f"• `{w}`" for w in severe) + "\n\n"
-    else:
-        msg += "🚫 Juda qo'pol so'zlar yo'q.\n\n"
-
-    if warns:
-        msg += f"💬 *Ogohlantirish matnlari ({len(warns)} ta):*\n"
-        for i, w in enumerate(warns, 1):
-            msg += f"{i}. _{w}_\n"
-    else:
-        msg += "💬 Ogohlantirish matni yo'q."
-
-    msg += ("\n\n`/addbadword` `/addsevereword`\n"
-            "`/addwarning` `/removebadword`\n"
-            "`/removewarning <raqam>`")
-    await update.message.reply_text(msg, parse_mode="Markdown")
-
-
-async def cmd_removebadword(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_superadmin(update.effective_user.id): return
-    args = context.args
-    if not args:
-        await update.message.reply_text(
-            "❌ Format: `/removebadword so'z`", parse_mode="Markdown"); return
-    word = " ".join(args).lower().strip()
-    bw   = load_badwords()
-    if word in bw["words"]:
-        bw["words"].remove(word)
-        save_badwords(bw)
-        await update.message.reply_text(f"✅ O'chirildi: `{word}`", parse_mode="Markdown")
-    elif word in bw["severe_words"]:
-        bw["severe_words"].remove(word)
-        save_badwords(bw)
-        await update.message.reply_text(
-            f"✅ Juda qo'pol ro'yxatidan o'chirildi: `{word}`", parse_mode="Markdown")
-    else:
-        await update.message.reply_text(f"❌ `{word}` topilmadi!", parse_mode="Markdown")
-
-
-async def cmd_removewarning(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_superadmin(update.effective_user.id): return
-    args = context.args
-    if not args:
-        await update.message.reply_text(
-            "❌ Format: `/removewarning 1`", parse_mode="Markdown"); return
-    try:
-        n = int(args[0])
-    except ValueError:
-        await update.message.reply_text("❌ Raqam kiriting."); return
-    bw    = load_badwords()
-    warns = bw.get("warnings", [])
-    if n < 1 or n > len(warns):
-        await update.message.reply_text(f"❌ {n}-ogohlantirish yo'q!"); return
-    removed = warns.pop(n - 1)
-    save_badwords(bw)
-    await update.message.reply_text(
-        f"✅ O'chirildi:\n_{removed}_", parse_mode="Markdown")
-
-
-# ══════════════════════════════════════════════════════
-#  COMMANDS
+#  /start
 # ══════════════════════════════════════════════════════
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid  = update.effective_user.id
+    user = update.effective_user
     chat = update.effective_chat
     register_chat(chat)
-    raw = update.effective_user.first_name or "Admin"
-    dn  = get_display_name(uid, raw)
 
+    # Referral
+    ref_by = None
+    if context.args:
+        arg = context.args[0]
+        if arg.startswith("ref_"):
+            try:
+                ref_by = int(arg[4:])
+            except ValueError:
+                pass
+
+    is_new = register_user(user, ref_by=ref_by)
+
+    # Guruhda
     if chat.type in ("group", "supergroup"):
         topics = all_topics()
         names  = ", ".join(f"{t['emoji']}{t['name']}" for t in topics) if topics else "hali yo'q"
@@ -1120,47 +1355,226 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown")
         return
 
+    raw = user.first_name or "Admin"
+    dn  = get_display_name(uid, raw)
+
     if is_superadmin(uid):
         await update.message.reply_text(
             f"👋 Salom, *{dn}*! 👑\n\n"
-            "📁 `/newtopic` `/listtopics` `/deletetopic` `/setprize`\n"
-            "📝 `/addq` `/bulkq`  🔐 `/edittopicaccess`\n"
-            "🎮 `/listgames`\n\n"
-            "👥 *Admin boshqarish:*\n"
-            "➕ `/addadmin`  📋 `/listadmins`\n"
-            "⚙️ `/editadmin <uid>`\n"
-            "🏷 `/setdisplayname me <nom>` yoki `<uid> <nom>`\n\n"
-            "📤 `/sendas` — botdan guruhga xabar\n"
-            "🔐 `/requireadmin` — guruhda admin talab\n\n"
-            "🔤 *So'z filtri:*\n"
-            "`/addbadword` `/addsevereword`\n"
-            "`/addwarning` `/listbadwords` `/removebadword`\n"
-            "`/removewarning`\n\n"
-            "📢 `/broadcast`\n"
-            "📦 `/export`  ♻️ `/restore`",
-            parse_mode="Markdown")
+            "Superadmin boshqaruv paneli:",
+            parse_mode="Markdown",
+            reply_markup=_superadmin_main_kb())
 
     elif is_bot_admin(uid):
-        lim  = get_admin_topic_limit(uid)
-        mq   = get_admin_max_questions(uid)
+        lim   = get_admin_topic_limit(uid)
+        mq    = get_admin_max_questions(uid)
         owned = count_admin_topics(uid)
-        info = load_admins().get(str(uid), {})
-        ca   = info.get("can_add_admins", False)
-        sub_s = info.get("sub_admin_settings", {})
-        extra = ""
-        if ca:
-            extra = (f"\n👥 Sub-adminlar: {count_sub_admins(uid)}/{sub_s.get('max_admins','?')}"
-                     f"\n➕ `/addadmin` — sub-admin qo'shish")
         await update.message.reply_text(
             f"👋 Salom, *{dn}*!\n\n"
-            f"📊 Topic: {owned}/{lim} | Savol/topic: {mq}{extra}\n\n"
-            "📁 `/newtopic` `/listtopics`\n"
-            "📝 `/addq` `/bulkq`\n"
-            "🔐 `/edittopicaccess`",
-            parse_mode="Markdown")
-    else:
-        await update.message.reply_text("👋 Salom!\n\n📨 Adminga murojaat: /contact")
+            f"📊 Topic: {owned}/{lim} | Savol/topic: {mq}",
+            parse_mode="Markdown",
+            reply_markup=_admin_main_kb(uid))
 
+    else:
+        tarif = get_user_tarif(uid)
+        tarif_name = TARIF_NAMES.get(tarif, tarif)
+        u_data = get_user(uid)
+        rc     = u_data.get("referral_count", 0) if u_data else 0
+        t_lim  = get_user_topic_limit(uid)
+        q_lim  = get_user_q_limit(uid)
+        bot_me = await context.bot.get_me()
+        ref_link = f"https://t.me/{bot_me.username}?start=ref_{uid}"
+
+        welcome = "🎉 Botga xush kelibsiz!" if is_new else f"👋 Salom, *{dn}*!"
+        await update.message.reply_text(
+            f"{welcome}\n\n"
+            f"💎 Tarif: *{tarif_name}*\n"
+            f"📁 Topic limiti: {t_lim} ta\n"
+            f"❓ Savol limiti: {q_lim} ta/topic\n"
+            f"👥 Referallar: {rc}\n\n"
+            f"🔗 Referral link:\n`{ref_link}`",
+            parse_mode="Markdown",
+            reply_markup=_user_main_kb(uid))
+
+# ══════════════════════════════════════════════════════
+#  USER MENU CALLBACKS
+# ══════════════════════════════════════════════════════
+
+async def _handle_user_menu(q, uid: int, data: str, context: ContextTypes.DEFAULT_TYPE):
+    """Oddiy user uchun inline menu."""
+
+    if data == "u:back":
+        tarif = get_user_tarif(uid)
+        tarif_name = TARIF_NAMES.get(tarif, tarif)
+        t_lim = get_user_topic_limit(uid)
+        q_lim = get_user_q_limit(uid)
+        u_data = get_user(uid)
+        rc = u_data.get("referral_count", 0) if u_data else 0
+        await q.edit_message_text(
+            f"💎 Tarif: *{tarif_name}*\n"
+            f"📁 Topic limiti: {t_lim} ta\n"
+            f"❓ Savol limiti: {q_lim} ta/topic\n"
+            f"👥 Referallar: {rc}",
+            parse_mode="Markdown",
+            reply_markup=_user_main_kb(uid))
+        return
+
+    if data == "u:tarif":
+        tarif  = get_user_tarif(uid)
+        t_name = TARIF_NAMES.get(tarif, tarif)
+        u_data = get_user(uid)
+        exp    = u_data.get("tarif_expires", "Abadiy") if u_data else "—"
+        t_lim  = get_user_topic_limit(uid)
+        q_lim  = get_user_q_limit(uid)
+        kb = InlineKeyboardMarkup([
+            [IKB("🛒 Tarif o'zgartirish", callback_data="u:buy")],
+            [IKB("⬅️ Orqaga",             callback_data="u:back")],
+        ])
+        await q.edit_message_text(
+            f"💎 *Joriy tarif: {t_name}*\n\n"
+            f"📁 Topic limiti: {t_lim} ta\n"
+            f"❓ Savol/topic limiti: {q_lim} ta\n"
+            f"⏳ Muddat: `{exp}`",
+            parse_mode="Markdown", reply_markup=kb)
+        return
+
+    if data == "u:referral":
+        u_data = get_user(uid)
+        rc     = u_data.get("referral_count", 0) if u_data else 0
+        t_lim  = get_user_topic_limit(uid)
+        bot_me = await context.bot.get_me()
+        ref_link = f"https://t.me/{bot_me.username}?start=ref_{uid}"
+        next_bonus = FREE_REFERRAL_PER_TOPIC - (rc % FREE_REFERRAL_PER_TOPIC)
+        kb = InlineKeyboardMarkup([[IKB("⬅️ Orqaga", callback_data="u:back")]])
+        await q.edit_message_text(
+            f"👥 *Referallaringiz: {rc} ta*\n\n"
+            f"📁 Joriy topic limiti: {t_lim} ta\n"
+            f"➕ Keyingi bonus uchun: {next_bonus} ta referal\n\n"
+            f"🔗 Referral havolangiz:\n`{ref_link}`\n\n"
+            f"_Har {FREE_REFERRAL_PER_TOPIC} ta referal = +1 topic (max 5 ta)_",
+            parse_mode="Markdown", reply_markup=kb)
+        return
+
+    if data == "u:topics":
+        topics = [t for t in all_topics() if t.get("created_by") == uid]
+        if not topics:
+            kb = InlineKeyboardMarkup([[IKB("⬅️ Orqaga", callback_data="u:back")]])
+            await q.edit_message_text("📭 Sizning topiclaringiz yo'q.",
+                                      reply_markup=kb)
+            return
+        lines = [f"{t['emoji']} *{t['name']}* — {len(t['questions'])} savol"
+                 for t in topics]
+        kb = InlineKeyboardMarkup([[IKB("⬅️ Orqaga", callback_data="u:back")]])
+        await q.edit_message_text(
+            f"📋 *Topiclaringiz ({len(topics)} ta):*\n\n" + "\n".join(lines),
+            parse_mode="Markdown", reply_markup=kb)
+        return
+
+    if data == "u:contact":
+        context.user_data["step"] = "contact_waiting"
+        await q.edit_message_text(
+            "📨 *Adminga xabar yozish*\n\n"
+            "Xabaringizni yuboring — matn, rasm, video, GIF, stiker.\n"
+            "⚠️ Hech qayerda saqlanmaydi!\n\n⏹ /cancel")
+        return
+
+    if data == "u:buy":
+        await q.edit_message_text(
+            "🛒 *Tarif tanlang:*\n\n"
+            "To'lov Stars orqali amalga oshiriladi.\n"
+            "Xarid qilingach superadminga xabar boriladi.",
+            parse_mode="Markdown",
+            reply_markup=_buy_tarif_kb())
+        return
+
+# ══════════════════════════════════════════════════════
+#  STARS TO'LOV
+# ══════════════════════════════════════════════════════
+
+async def _send_invoice(bot, chat_id: int, tarif: str, uid: int):
+    prices = get_tarif_prices()
+    stars  = prices.get(tarif, DEFAULT_PRICES.get(tarif, 100))
+    names  = {
+        TARIF_PLUS:    "PLUS ✨ tarifi",
+        TARIF_PREMIUM: "Premium 💎 tarifi",
+        TARIF_VIP:     "VIP 👑 tarifi",
+    }
+    descs = {
+        TARIF_PLUS:    f"📁 10 topic | ❓ 100 savol/topic",
+        TARIF_PREMIUM: f"📁 20 topic | ❓ 200 savol/topic",
+        TARIF_VIP:     f"📁 70 topic | ❓ 1500 savol/topic + Admin qo'shish",
+    }
+    await bot.send_invoice(
+        chat_id=chat_id,
+        title=names.get(tarif, tarif),
+        description=descs.get(tarif, ""),
+        payload=f"tarif:{tarif}:{uid}",
+        currency="XTR",
+        prices=[LabeledPrice(label=names.get(tarif, tarif), amount=stars)],
+    )
+
+async def cmd_precheckout(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.pre_checkout_query
+    await query.answer(ok=True)
+
+async def cmd_successful_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid     = update.effective_user.id
+    user    = update.effective_user
+    payment = update.message.successful_payment
+    payload = payment.invoice_payload
+
+    if not payload.startswith("tarif:"):
+        return
+
+    parts = payload.split(":")
+    if len(parts) < 3:
+        return
+
+    tarif    = parts[1]
+    buyer_id = int(parts[2])
+
+    # Tarifni beramiz (30 kun)
+    users = load_users()
+    k     = str(buyer_id)
+    if k not in users:
+        register_user(user)
+        users = load_users()
+    users[k]["tarif"]         = tarif
+    exp = datetime.now(TZ) + timedelta(days=30)
+    users[k]["tarif_expires"] = exp.isoformat()
+    save_users(users)
+
+    tarif_name = TARIF_NAMES.get(tarif, tarif)
+    stars      = payment.total_amount
+
+    await update.message.reply_text(
+        f"✅ *To'lov qabul qilindi!*\n\n"
+        f"💎 Tarif: *{tarif_name}*\n"
+        f"⭐ Stars: {stars}\n"
+        f"⏳ Muddat: 30 kun\n\n"
+        f"Endi barcha imkoniyatlar faol!",
+        parse_mode="Markdown")
+
+    # Superadminga xabar
+    info_text = format_user_info(user=user)
+    try:
+        await context.bot.send_message(
+            SUPERADMIN,
+            f"💰 *YANGI TO'LOV!*\n\n"
+            f"💎 Tarif: *{tarif_name}*\n"
+            f"⭐ Stars: {stars}\n\n"
+            f"{info_text}",
+            parse_mode="Markdown")
+    except Exception:
+        pass
+
+    # Tarif topic'ini yangilash
+    asyncio.create_task(update_tarif_topic_json(context.bot, tarif))
+    asyncio.create_task(auto_export(context.bot))
+
+# ══════════════════════════════════════════════════════
+#  /contact
+# ══════════════════════════════════════════════════════
 
 async def cmd_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
@@ -1176,7 +1590,6 @@ async def cmd_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "⚠️ Hech qayerda saqlanmaydi!\n\n⏹ /cancel",
         parse_mode="Markdown")
 
-
 async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data.get("step"):
         context.user_data.clear()
@@ -1184,29 +1597,26 @@ async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("⚠️ Bekor qilinadigan jarayon yo'q.")
 
+# ══════════════════════════════════════════════════════
+#  ADMIN KOMANDALAR
+# ══════════════════════════════════════════════════════
 
 async def cmd_addadmin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     if update.effective_chat.type != "private":
         return
-
     adm = load_admins()
-
-    # Kim add qila oladi?
     if not is_superadmin(uid):
         info = adm.get(str(uid), {})
         if not info.get("can_add_admins"):
             return
-        sub_s  = info.get("sub_admin_settings", {})
+        sub_s   = info.get("sub_admin_settings", {})
         max_adm = sub_s.get("max_admins", 0)
         if count_sub_admins(uid) >= max_adm:
             await update.message.reply_text(
                 f"❌ Sub-admin limiti to'ldi! ({count_sub_admins(uid)}/{max_adm})")
             return
-
     args = context.args
-
-    # Limitlar (kim qo'shyapti)
     if is_superadmin(uid):
         max_tl = MAX_TOPICS
         max_mq = MAX_QUESTIONS
@@ -1214,7 +1624,6 @@ async def cmd_addadmin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         sub_s  = adm.get(str(uid), {}).get("sub_admin_settings", {})
         max_tl = sub_s.get("max_topic_limit", 10)
         max_mq = sub_s.get("max_questions_per_topic", MAX_QUESTIONS)
-
     if args:
         try:
             new_uid = int(args[0])
@@ -1226,9 +1635,7 @@ async def cmd_addadmin(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         if str(new_uid) in adm:
             await update.message.reply_text(
-                f"⚠️ `{new_uid}` allaqachon admin!\n"
-                f"Tahrirlash: `/editadmin {new_uid}`",
-                parse_mode="Markdown")
+                f"⚠️ `{new_uid}` allaqachon admin!", parse_mode="Markdown")
             return
         context.user_data.clear()
         context.user_data.update({"step": "addadmin_tlimit",
@@ -1244,7 +1651,6 @@ async def cmd_addadmin(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                    "aa_max_tl": max_tl, "aa_max_mq": max_mq})
         await update.message.reply_text("➕ *Admin qo'shish*\n\nUser ID kiriting:",
                                         parse_mode="Markdown")
-
 
 async def cmd_removeadmin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
@@ -1274,13 +1680,11 @@ async def cmd_removeadmin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"✅ `{rm_uid}` adminlikdan olib tashlandi.", parse_mode="Markdown")
 
-
 async def cmd_listadmins(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     if not is_admin_or_superadmin(uid):
         return
     adm = load_admins()
-
     if not is_superadmin(uid):
         info = adm.get(str(uid), {})
         if not info.get("can_add_admins"):
@@ -1300,13 +1704,10 @@ async def cmd_listadmins(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "👥 *Sizning sub-adminlaringiz:*\n\n" + "\n".join(lines),
             parse_mode="Markdown")
         return
-
     if not adm:
-        await update.message.reply_text(
-            "👥 Admin yo'q.\n\nQo'shish: `/addadmin <uid>`",
-            parse_mode="Markdown")
+        await update.message.reply_text("👥 Admin yo'q.\n\nQo'shish: `/addadmin <uid>`",
+                                        parse_mode="Markdown")
         return
-
     lines = []
     btns  = []
     for k, v in adm.items():
@@ -1315,16 +1716,13 @@ async def cmd_listadmins(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ca    = "✅" if v.get("can_add_admins") else "❌"
         by    = v.get("added_by", SUPERADMIN)
         by_s  = f" ← `{by}`" if by != SUPERADMIN else ""
-        lines.append(
-            f"👤 `{k}` [{dn}] topic:{owned}/{v['topic_limit']} "
-            f"savol:{v.get('max_questions',MAX_QUESTIONS)} admin:{ca}{by_s}")
+        lines.append(f"👤 `{k}` [{dn}] topic:{owned}/{v['topic_limit']} "
+                     f"savol:{v.get('max_questions',MAX_QUESTIONS)} admin:{ca}{by_s}")
         btns.append([IKB(f"⚙️ {k} ({dn})", callback_data=f"edit_adm:{k}")])
-
     await update.message.reply_text(
         f"👥 *Adminlar ({len(adm)} ta):*\n\n" + "\n".join(lines) + "\n\nTahrirlash:",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(btns))
-
 
 async def cmd_editadmin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_superadmin(update.effective_user.id):
@@ -1347,17 +1745,16 @@ async def cmd_editadmin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         _editadmin_txt(uid_e, info), parse_mode="Markdown",
         reply_markup=_editadmin_kb(uid_e, info))
 
-
 async def cmd_setdisplayname(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_superadmin(update.effective_user.id):
         return
     args = context.args
     if not args:
         await update.message.reply_text(
-            "🏷 *Display name belgilash*\n\n"
-            "O'zingiz uchun: `/setdisplayname me 👑 Boss`\n"
-            "Admin uchun:   `/setdisplayname 123456 🌟 Ali`\n"
-            "O'chirish:     `/setdisplayname 123456 -`",
+            "🏷 *Display name:*\n\n"
+            "O'zingiz: `/setdisplayname me 👑 Boss`\n"
+            "Admin:    `/setdisplayname 123456 🌟 Ali`\n"
+            "O'chirish: `/setdisplayname 123456 -`",
             parse_mode="Markdown")
         return
     target     = args[0]
@@ -1365,7 +1762,6 @@ async def cmd_setdisplayname(update: Update, context: ContextTypes.DEFAULT_TYPE)
     name = " ".join(name_parts) if name_parts else None
     if name == "-":
         name = None
-
     if target.lower() == "me":
         set_display_name(SUPERADMIN, name)
         msg = f"✅ O'z nomingiz: *{name}*" if name else "✅ Nomingiz o'chirildi."
@@ -1384,14 +1780,36 @@ async def cmd_setdisplayname(update: Update, context: ContextTypes.DEFAULT_TYPE)
                else f"✅ `{uid_t}` nomi o'chirildi.")
     await update.message.reply_text(msg, parse_mode="Markdown")
 
-
 async def cmd_newtopic(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    if not is_admin_or_superadmin(uid):
-        return
     if update.effective_chat.type != "private":
         await update.message.reply_text("❌ Faqat botda (private) ishlaydi.")
         return
+    # Kim topic yarata oladi?
+    if not is_admin_or_superadmin(uid):
+        # Oddiy user
+        t_lim  = get_user_topic_limit(uid)
+        owned  = count_admin_topics(uid)
+        if owned >= t_lim:
+            await update.message.reply_text(
+                f"❌ Topic limit to'ldi! ({owned}/{t_lim})\n\n"
+                "Qo'shimcha topic uchun:\n"
+                "• Referal to'plang (+1 har 3 ta)\n"
+                "• Tarif xarid qiling",
+                reply_markup=InlineKeyboardMarkup([
+                    [IKB("🛒 Tarif xarid qilish", callback_data="u:buy")]
+                ]))
+            return
+    else:
+        if is_superadmin(uid):
+            pass  # superadmin cheksiz
+        else:
+            lim   = get_admin_topic_limit(uid)
+            owned = count_admin_topics(uid)
+            if owned >= lim:
+                await update.message.reply_text(f"❌ Limit: {lim} ta topic ({owned}/{lim}).")
+                return
+
     args = context.args
     if not args:
         await update.message.reply_text("❌ `/newtopic english`", parse_mode="Markdown")
@@ -1403,23 +1821,11 @@ async def cmd_newtopic(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if topic_exists(name):
         await update.message.reply_text(f"❌ `{name}` allaqachon bor!", parse_mode="Markdown")
         return
-    if is_superadmin(uid):
-        if count_topics() >= MAX_TOPICS:
-            await update.message.reply_text(f"❌ Max {MAX_TOPICS} ta topic!")
-            return
-    else:
-        lim   = get_admin_topic_limit(uid)
-        owned = count_admin_topics(uid)
-        if owned >= lim:
-            await update.message.reply_text(
-                f"❌ Limit: {lim} ta topic ({owned}/{lim}).")
-            return
     context.user_data.clear()
     context.user_data.update({"step": "newtopic_emoji", "topic_name": name})
     await update.message.reply_text(
         f"✅ Topic nomi: *{name}*\n\n🎨 Emojiini yuboring _(masalan: 🇬🇧 🔢 🧠)_",
         parse_mode="Markdown")
-
 
 async def cmd_edittopicaccess(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
@@ -1433,10 +1839,7 @@ async def cmd_edittopicaccess(update: Update, context: ContextTypes.DEFAULT_TYPE
         if not is_superadmin(uid):
             topics = [t for t in topics if can_edit_topic_access(t, uid)]
         if not topics:
-            await update.message.reply_text("❌ Sizga tegishli topic yo'q.\n"
-                                             "_(faqat o'zingiz yaratgan topiclarning "
-                                             "ruxsatini o'zgartirishingiz mumkin)_",
-                                             parse_mode="Markdown")
+            await update.message.reply_text("❌ Sizga tegishli topic yo'q.")
             return
         kb = InlineKeyboardMarkup([
             [IKB(f"{t['emoji']} {t['name']}", callback_data=f"eta:{t['name']}")]
@@ -1451,61 +1854,71 @@ async def cmd_edittopicaccess(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text(f"❌ `{name}` mavjud emas!", parse_mode="Markdown")
         return
     if not can_edit_topic_access(t, uid):
-        await update.message.reply_text(
-            "❌ Faqat shu topicni yaratgan admin yoki superadmin "
-            "uning ruxsatini o'zgartira oladi!")
+        await update.message.reply_text("❌ Faqat topic egasi yoki superadmin!")
         return
     cur = ACCESS_LABELS.get(t.get("access", {}).get("type", "all"), "—")
     await update.message.reply_text(
         f"🔐 *{name}* — hozirgi: {cur}\n\nYangi access:",
         parse_mode="Markdown", reply_markup=_access_kb(name))
 
-
-
 async def cmd_addq(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    if not is_admin_or_superadmin(uid):
-        return
     if update.effective_chat.type != "private":
         await update.message.reply_text("❌ Faqat botda ishlaydi.")
         return
-    args = context.args
-    if not args:
-        topics = all_topics()
-        if not is_superadmin(uid):
-            uname  = update.effective_user.username
-            topics = [t for t in topics if can_manage_topic(t, uid, uname)]
-        if not topics:
-            await update.message.reply_text("❌ Sizga ruxsat berilgan topic yo'q.")
+    if not is_admin_or_superadmin(uid):
+        # Oddiy user ham savol qo'sha oladi — o'z topiciga
+        topics = [t for t in all_topics() if t.get("created_by") == uid]
+    else:
+        args = context.args
+        if not args:
+            topics = all_topics()
+            if not is_superadmin(uid):
+                uname  = update.effective_user.username
+                topics = [t for t in topics if can_manage_topic(t, uid, uname)]
+            if not topics:
+                await update.message.reply_text("❌ Sizga ruxsat berilgan topic yo'q.")
+                return
+            kb = InlineKeyboardMarkup([
+                [IKB(
+                    f"{t['emoji']} {t['name']} "
+                    f"({len(t['questions'])}/{get_admin_max_questions(t.get('created_by', uid))})",
+                    callback_data=f"addq_topic:{t['name']}"
+                )]
+                for t in topics
+            ])
+            await update.message.reply_text("📚 Qaysi topicga savol?", reply_markup=kb)
             return
-        kb = InlineKeyboardMarkup([
-            [IKB(
-                f"{t['emoji']} {t['name']} "
-                f"({len(t['questions'])}/{get_admin_max_questions(t.get('created_by', uid))})",
-                callback_data=f"addq_topic:{t['name']}"
-            )]
-            for t in topics
-        ])
-        await update.message.reply_text("📚 Qaysi topicga savol?", reply_markup=kb)
+        topics = []
+        name = args[0].lower()
+        t = load_topic(name)
+        if not t:
+            await update.message.reply_text(f"❌ `{name}` mavjud emas!", parse_mode="Markdown")
+            return
+        if not can_manage_topic(t, uid, update.effective_user.username):
+            await update.message.reply_text("❌ Bu topicga ruxsatingiz yo'q!")
+            return
+        mq = get_admin_max_questions(uid)
+        if len(t["questions"]) >= mq:
+            await update.message.reply_text(f"❌ Limit: {mq} ta savol!")
+            return
+        context.user_data.clear()
+        context.user_data.update({"step": "addq_question", "topic_name": name})
+        await update.message.reply_text(
+            f"📝 *{t['emoji']} {name}* — savol qo'shish\n\nSavol matnini yozing:\n⏹ /done",
+            parse_mode="Markdown")
         return
-    name = args[0].lower()
-    t = load_topic(name)
-    if not t:
-        await update.message.reply_text(f"❌ `{name}` mavjud emas!", parse_mode="Markdown")
-        return
-    if not can_manage_topic(t, uid, update.effective_user.username):
-        await update.message.reply_text("❌ Bu topicga ruxsatingiz yo'q!")
-        return
-    mq = get_admin_max_questions(uid)
-    if len(t["questions"]) >= mq:
-        await update.message.reply_text(f"❌ Limit: {mq} ta savol!")
-        return
-    context.user_data.clear()
-    context.user_data.update({"step": "addq_question", "topic_name": name})
-    await update.message.reply_text(
-        f"📝 *{t['emoji']} {name}* — savol qo'shish\n\nSavol matnini yozing:\n⏹ /done",
-        parse_mode="Markdown")
 
+    if not topics:
+        await update.message.reply_text(
+            "❌ Topicingiz yo'q.\n\nAvval /newtopic bilan topic yarating.")
+        return
+    kb = InlineKeyboardMarkup([
+        [IKB(f"{t['emoji']} {t['name']} ({len(t['questions'])}/{get_user_q_limit(uid)})",
+             callback_data=f"addq_topic:{t['name']}")]
+        for t in topics
+    ])
+    await update.message.reply_text("📚 Qaysi topicga savol?", reply_markup=kb)
 
 async def cmd_bulkq(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
@@ -1555,7 +1968,6 @@ async def cmd_bulkq(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "*Format:*\n`apple - olma`\n`orange - apelsin - sabzirang`\n\n⏹ /done",
         parse_mode="Markdown")
 
-
 async def _process_bulkq(update: Update, context: ContextTypes.DEFAULT_TYPE, raw: str = None):
     tn  = context.user_data.get("topic_name")
     uid = update.effective_user.id
@@ -1602,7 +2014,7 @@ async def _process_bulkq(update: Update, context: ContextTypes.DEFAULT_TYPE, raw
     await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=kb)
     if cnt >= mq:
         context.user_data.clear()
-
+    asyncio.create_task(auto_export(context.bot))
 
 async def cmd_listtopics(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
@@ -1630,7 +2042,6 @@ async def cmd_listtopics(update: Update, context: ContextTypes.DEFAULT_TYPE):
            f"📋 *Sizning topiclaringiz ({len(topics)}/{get_admin_topic_limit(uid)}):*")
     await update.message.reply_text(hdr + "\n\n" + "\n".join(lines), parse_mode="Markdown")
 
-
 async def cmd_deletetopic(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_superadmin(update.effective_user.id):
         return
@@ -1649,7 +2060,6 @@ async def cmd_deletetopic(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"⚠️ *{name}* o'chirilsinmi? Barcha savollar ham o'chadi!",
         parse_mode="Markdown", reply_markup=kb)
-
 
 async def cmd_setprize(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_superadmin(update.effective_user.id):
@@ -1678,7 +2088,6 @@ async def cmd_setprize(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🏆 *{name}* uchun sovrinni yuboring _(rasm, GIF yoki stiker)_:",
         parse_mode="Markdown")
 
-
 async def cmd_listgames(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_superadmin(update.effective_user.id):
         return
@@ -1696,7 +2105,6 @@ async def cmd_listgames(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🎮 *Faol o'yinlar:*\n\n" + "\n".join(lines),
         parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(btns))
-
 
 async def cmd_newgame(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
@@ -1745,7 +2153,6 @@ async def cmd_newgame(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown")
     await send_question(cid, context)
 
-
 async def cmd_endgame(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cid = update.effective_chat.id
     uid = update.effective_user.id
@@ -1765,7 +2172,6 @@ async def cmd_endgame(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"⏹ *{g['emoji']}{g['topic']} tugatildi!*", parse_mode="Markdown")
 
-
 async def cmd_scores(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cid = update.effective_chat.id
     g   = get_game(cid)
@@ -1781,15 +2187,12 @@ async def cmd_scores(update: Update, context: ContextTypes.DEFAULT_TYPE):
         res += f"{m} {dn}: {d['count']} ball\n"
     await update.message.reply_text(res, parse_mode="Markdown")
 
-
 async def cmd_del(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await is_group_admin(update, context):
         return
     uid  = update.effective_user.id
     cid  = update.effective_chat.id
     args = context.args
-
-    # Oddiy: reply qilingan xabarni o'chirish
     if not args:
         reply = update.message.reply_to_message
         if not reply:
@@ -1807,15 +2210,10 @@ async def cmd_del(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             await update.message.reply_text(f"❌ {e}")
         return
-
-    # Kengaytirilgan: faqat superadmin
     if not is_superadmin(uid):
         await update.message.reply_text("❌ Kengaytirilgan /del faqat superadmin uchun!")
         return
-
-    target = args[0]  # @a yoki @username
-
-    # Vaqtni parse qilish
+    target   = args[0]
     since_ts = None
     if len(args) >= 3:
         try:
@@ -1831,41 +2229,30 @@ async def cmd_del(update: Update, context: ContextTypes.DEFAULT_TYPE):
             since_ts = dt.replace(tzinfo=TZ).timestamp()
         except ValueError:
             pass
-
     history = msg_history.get(cid, [])
-
     if target == "@a":
         to_del = history
     else:
         uname  = target.lstrip("@").lower()
         to_del = [m for m in history
                   if m["uname"] == uname or str(m["uid"]) == uname]
-
     if since_ts:
         to_del = [m for m in to_del if m["ts"] >= since_ts]
-
     if not to_del:
         await update.message.reply_text(
-            "❌ O'chiriladigan xabar topilmadi.\n"
-            "_(Bot restart bo'lsa tarix yo'qoladi)_")
+            "❌ O'chiriladigan xabar topilmadi.\n_(Bot restart bo'lsa tarix yo'qoladi)_")
         return
-
     try:
         await update.message.delete()
     except Exception:
         pass
-
     prog = await context.bot.send_message(
         cid, f"🗑 *{len(to_del)} ta xabar o'chirilmoqda...*", parse_mode="Markdown")
-
     ids = [m["id"] for m in to_del]
     d, f = await _del_batch(context, cid, ids)
-
-    # Tarixdan o'chirilganlarni tozalash
     del_set = set(ids)
     if cid in msg_history:
         msg_history[cid] = [m for m in msg_history[cid] if m["id"] not in del_set]
-
     try:
         await prog.edit_text(
             f"✅ *O'chirildi: {d} ta*\n❌ Xato: {f} ta",
@@ -1873,24 +2260,217 @@ async def cmd_del(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         pass
 
+# ── Superadmin yangi komandalar ──
+
+async def cmd_setprice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Tarif narxini o'zgartirish. /setprice plus 30"""
+    if not is_superadmin(update.effective_user.id):
+        return
+    args = context.args
+    if len(args) < 2:
+        prices = get_tarif_prices()
+        await update.message.reply_text(
+            "💰 *Tarif narxlari:*\n\n"
+            f"✨ PLUS: {prices[TARIF_PLUS]} ⭐\n"
+            f"💎 Premium: {prices[TARIF_PREMIUM]} ⭐\n"
+            f"👑 VIP: {prices[TARIF_VIP]} ⭐\n\n"
+            "Format: `/setprice plus 30`\n"
+            "Tariflar: `plus`, `premium`, `vip`",
+            parse_mode="Markdown",
+            reply_markup=_tarif_admin_kb())
+        return
+    tarif_key = args[0].lower()
+    tarif_map = {"plus": TARIF_PLUS, "premium": TARIF_PREMIUM, "vip": TARIF_VIP}
+    if tarif_key not in tarif_map:
+        await update.message.reply_text("❌ Tariflar: `plus`, `premium`, `vip`",
+                                        parse_mode="Markdown")
+        return
+    try:
+        price = int(args[1])
+    except ValueError:
+        await update.message.reply_text("❌ Narx raqam bo'lishi kerak.")
+        return
+    cfg = load_config()
+    cfg.setdefault("tarif_prices", {})[tarif_map[tarif_key]] = price
+    save_config(cfg)
+    await update.message.reply_text(
+        f"✅ *{TARIF_NAMES[tarif_map[tarif_key]]}* narxi: *{price} ⭐*",
+        parse_mode="Markdown")
+
+async def cmd_setchannel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Obuna kanali o'rnatish. /setchannel -100123456"""
+    if not is_superadmin(update.effective_user.id):
+        return
+    args = context.args
+    if not args:
+        cur = get_sub_channel()
+        await update.message.reply_text(
+            f"📢 *Obuna kanali:* `{cur or 'belgilanmagan'}`\n\n"
+            "Format: `/setchannel -100123456789`\n"
+            "O'chirish: `/setchannel 0`",
+            parse_mode="Markdown")
+        return
+    try:
+        cid = int(args[0])
+    except ValueError:
+        await update.message.reply_text("❌ Kanal ID raqam bo'lishi kerak.")
+        return
+    if cid == 0:
+        set_sub_channel(None)
+        await update.message.reply_text("✅ Obuna kanali o'chirildi.")
+    else:
+        set_sub_channel(cid)
+        await update.message.reply_text(
+            f"✅ Obuna kanali: `{cid}`", parse_mode="Markdown")
+
+async def cmd_delmsgs(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Guruh xabarlarini o'chirish. /delmsgs <chat_id> [user_id]"""
+    if not is_superadmin(update.effective_user.id):
+        return
+    args = context.args
+    if not args:
+        await update.message.reply_text(
+            "❌ `/delmsgs <chat_id> [user_id]`\n\n"
+            "Misollar:\n"
+            "`/delmsgs -100123456` — guruhning barcha xabarlarini\n"
+            "`/delmsgs -100123456 123456789` — faqat shu userni",
+            parse_mode="Markdown")
+        return
+    try:
+        chat_id = int(args[0])
+    except ValueError:
+        await update.message.reply_text("❌ chat_id raqam bo'lishi kerak.")
+        return
+    user_id = None
+    if len(args) >= 2:
+        try:
+            user_id = int(args[1])
+        except ValueError:
+            pass
+    history = msg_history.get(chat_id, [])
+    if user_id:
+        to_del = [m for m in history if m["uid"] == user_id]
+    else:
+        to_del = history.copy()
+    if not to_del:
+        await update.message.reply_text(
+            "❌ Xabar topilmadi. Bot restart bo'lgandan beri xabar yo'q.")
+        return
+    prog = await update.message.reply_text(
+        f"🗑 *{len(to_del)} ta xabar o'chirilmoqda...*", parse_mode="Markdown")
+    ids = [m["id"] for m in to_del]
+    d, f = await _del_batch(context, chat_id, ids)
+    del_set = set(ids)
+    if chat_id in msg_history:
+        msg_history[chat_id] = [m for m in msg_history[chat_id] if m["id"] not in del_set]
+    try:
+        await prog.edit_text(
+            f"✅ *O'chirildi: {d} ta*\n❌ Xato: {f} ta",
+            parse_mode="Markdown")
+    except Exception:
+        pass
+
+async def cmd_delbotmsg(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Bot xabarini o'chirish. /delbotmsg <chat_id> <msg_id>"""
+    if not is_superadmin(update.effective_user.id):
+        return
+    args = context.args
+    if len(args) < 2:
+        await update.message.reply_text(
+            "❌ `/delbotmsg <chat_id> <msg_id>`", parse_mode="Markdown")
+        return
+    try:
+        chat_id = int(args[0])
+        msg_id  = int(args[1])
+    except ValueError:
+        await update.message.reply_text("❌ Raqam kiriting.")
+        return
+    try:
+        await context.bot.delete_message(chat_id, msg_id)
+        await update.message.reply_text("✅ Xabar o'chirildi.")
+    except Exception as e:
+        await update.message.reply_text(f"❌ O'chirib bo'lmadi:\n`{e}`",
+                                        parse_mode="Markdown")
+
+async def cmd_createtopic(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Supergroup'da forum topic yaratish. /createtopic <nom>"""
+    if not is_superadmin(update.effective_user.id):
+        return
+    if not SUPERGROUP_ID:
+        await update.message.reply_text(
+            "❌ SUPERGROUP_ID ENV o'zgaruvchisi o'rnatilmagan!")
+        return
+    args = context.args
+    if not args:
+        ft = get_forum_topics()
+        lines = [f"• `{k}` → thread_id: `{v}`" for k, v in ft.items()]
+        text  = "📋 *Mavjud forum topiclar:*\n\n" + ("\n".join(lines) if lines else "Hali yo'q")
+        kb = InlineKeyboardMarkup([
+            [IKB("👑 VIP topic",     callback_data="ft:vip"),
+             IKB("💎 Premium topic", callback_data="ft:premium")],
+            [IKB("✨ PLUS topic",    callback_data="ft:plus"),
+             IKB("📦 Backup topic",  callback_data="ft:backup")],
+            [IKB("🏫 Sinf topici yaratish", callback_data="ft:class")],
+        ])
+        await update.message.reply_text(text, parse_mode="Markdown", reply_markup=kb)
+        return
+    name = " ".join(args)
+    tid  = await ensure_forum_topic(context.bot, name, f"custom_{name.lower().replace(' ','_')}")
+    if tid:
+        await update.message.reply_text(
+            f"✅ Topic yaratildi: *{name}*\nID: `{tid}`", parse_mode="Markdown")
+    else:
+        await update.message.reply_text("❌ Topic yaratib bo'lmadi.")
+
+async def cmd_userinfo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """User ma'lumotlari. /userinfo <uid>"""
+    if not is_superadmin(update.effective_user.id):
+        return
+    args = context.args
+    if not args:
+        await update.message.reply_text("❌ `/userinfo <uid>`", parse_mode="Markdown")
+        return
+    try:
+        uid_t = int(args[0])
+    except ValueError:
+        await update.message.reply_text("❌ Raqam kiriting.")
+        return
+    text = format_user_info(uid=uid_t)
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+async def cmd_listusers(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Barcha userlar ro'yxati."""
+    if not is_superadmin(update.effective_user.id):
+        return
+    users = load_users()
+    if not users:
+        await update.message.reply_text("👤 Userlar yo'q.")
+        return
+    by_tarif = {}
+    for u in users.values():
+        t = u.get("tarif", TARIF_FREE)
+        by_tarif[t] = by_tarif.get(t, 0) + 1
+    lines = [f"• {TARIF_NAMES.get(t, t)}: {n} ta" for t, n in by_tarif.items()]
+    await update.message.reply_text(
+        f"👤 *Jami foydalanuvchilar: {len(users)} ta*\n\n" +
+        "\n".join(lines),
+        parse_mode="Markdown")
 
 async def cmd_export(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_superadmin(update.effective_user.id):
         return
     await update.message.reply_text("📦 Export qilinmoqda...")
-    ok = await do_export(context.bot)
+    ok = await do_export(context.bot, to_backup_topic=True)
     await update.message.reply_text(
-        "✅ Export muvaffaqiyatli!" if ok else "❌ Export xato! Log ni tekshiring.")
-
+        "✅ Export muvaffaqiyatli!" if ok else "❌ Export xato!")
 
 async def cmd_restore(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_superadmin(update.effective_user.id):
         return
     context.user_data["step"] = "restore_waiting"
     await update.message.reply_text(
-        "♻️ *Ma'lumotlarni tiklash*\n\nExport kanaldan JSON faylni yuboring.\n⏹ /cancel",
+        "♻️ *Ma'lumotlarni tiklash*\n\nExport JSON faylni yuboring.\n⏹ /cancel",
         parse_mode="Markdown")
-
 
 async def cmd_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_superadmin(update.effective_user.id):
@@ -1911,6 +2491,132 @@ async def cmd_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📢 *Reklama yuborish*\n\n💬 Chatlar: {stats}\n\nKimga?",
         parse_mode="Markdown", reply_markup=kb)
 
+# PLUS/MINUS komandalar
+async def cmd_sendas(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_superadmin(update.effective_user.id):
+        return
+    chats  = load_chats()
+    groups = {k: v for k, v in chats.items() if v.get("type") in ("group", "supergroup")}
+    if not groups:
+        await update.message.reply_text("❌ Ro'yxatda guruh yo'q.")
+        return
+    btns = [[IKB(v.get("name", k), callback_data=f"sendas:{k}")] for k, v in groups.items()]
+    await update.message.reply_text(
+        "📤 *Botdan xabar yuborish*\n\nQaysi guruhga?",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(btns))
+
+async def cmd_requireadmin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_superadmin(update.effective_user.id):
+        return
+    chats  = load_chats()
+    groups = {k: v for k, v in chats.items() if v.get("type") in ("group", "supergroup")}
+    if not groups:
+        await update.message.reply_text("❌ Guruh yo'q.")
+        return
+    btns = []
+    for k, v in groups.items():
+        req = v.get("require_admin", False)
+        s   = "🟢" if req else "🔴"
+        btns.append([IKB(f"{s} {v.get('name', k)}", callback_data=f"req_adm:{k}")])
+    btns.append([IKB("✅ Tayyor", callback_data="req_adm_done")])
+    await update.message.reply_text(
+        "🔐 *Guruhlar — Admin talab:*\n\n"
+        "🟢 YONIQ\n🔴 O'CHIQ\n\nBosib yoqing/o'chiring:",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(btns))
+
+async def cmd_addbadword(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_superadmin(update.effective_user.id): return
+    args = context.args
+    if not args:
+        await update.message.reply_text("❌ `/addbadword so'z`", parse_mode="Markdown"); return
+    word = " ".join(args).lower().strip()
+    bw   = load_badwords()
+    if word in bw["words"] or word in bw["severe_words"]:
+        await update.message.reply_text(f"⚠️ `{word}` allaqachon ro'yxatda!",
+                                        parse_mode="Markdown"); return
+    bw["words"].append(word)
+    save_badwords(bw)
+    await update.message.reply_text(f"✅ So'z qo'shildi: `{word}`", parse_mode="Markdown")
+
+async def cmd_addsevereword(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_superadmin(update.effective_user.id): return
+    args = context.args
+    if not args:
+        await update.message.reply_text("❌ `/addsevereword so'z`", parse_mode="Markdown"); return
+    word = " ".join(args).lower().strip()
+    bw   = load_badwords()
+    if word in bw["severe_words"]:
+        await update.message.reply_text(f"⚠️ `{word}` allaqachon qo'pol ro'yxatda!",
+                                        parse_mode="Markdown"); return
+    if word in bw["words"]:
+        bw["words"].remove(word)
+    bw["severe_words"].append(word)
+    save_badwords(bw)
+    await update.message.reply_text(f"🚫 Qo'pol so'z qo'shildi: `{word}`", parse_mode="Markdown")
+
+async def cmd_addwarning(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_superadmin(update.effective_user.id): return
+    args = context.args
+    if not args:
+        await update.message.reply_text("❌ `/addwarning Matn`", parse_mode="Markdown"); return
+    text = " ".join(args)
+    bw   = load_badwords()
+    bw["warnings"].append(text)
+    save_badwords(bw)
+    await update.message.reply_text(f"✅ Ogohlantirish qo'shildi:\n_{text}_", parse_mode="Markdown")
+
+async def cmd_listbadwords(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_superadmin(update.effective_user.id): return
+    bw     = load_badwords()
+    words  = bw.get("words", [])
+    severe = bw.get("severe_words", [])
+    warns  = bw.get("warnings", [])
+    msg    = "🔤 *So'z filtri:*\n\n"
+    if words:
+        msg += f"⚠️ *Oddiy ({len(words)} ta):*\n" + "\n".join(f"• `{w}`" for w in words) + "\n\n"
+    if severe:
+        msg += f"🚫 *Qo'pol ({len(severe)} ta):*\n" + "\n".join(f"• `{w}`" for w in severe) + "\n\n"
+    if warns:
+        msg += f"💬 *Ogohlantirishlar ({len(warns)} ta):*\n"
+        for i, w in enumerate(warns, 1):
+            msg += f"{i}. _{w}_\n"
+    await update.message.reply_text(msg or "Bo'sh.", parse_mode="Markdown")
+
+async def cmd_removebadword(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_superadmin(update.effective_user.id): return
+    args = context.args
+    if not args:
+        await update.message.reply_text("❌ `/removebadword so'z`", parse_mode="Markdown"); return
+    word = " ".join(args).lower().strip()
+    bw   = load_badwords()
+    if word in bw["words"]:
+        bw["words"].remove(word); save_badwords(bw)
+        await update.message.reply_text(f"✅ O'chirildi: `{word}`", parse_mode="Markdown")
+    elif word in bw["severe_words"]:
+        bw["severe_words"].remove(word); save_badwords(bw)
+        await update.message.reply_text(f"✅ Qo'pol ro'yxatdan o'chirildi: `{word}`",
+                                        parse_mode="Markdown")
+    else:
+        await update.message.reply_text(f"❌ `{word}` topilmadi!", parse_mode="Markdown")
+
+async def cmd_removewarning(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_superadmin(update.effective_user.id): return
+    args = context.args
+    if not args:
+        await update.message.reply_text("❌ `/removewarning 1`", parse_mode="Markdown"); return
+    try:
+        n = int(args[0])
+    except ValueError:
+        await update.message.reply_text("❌ Raqam kiriting."); return
+    bw    = load_badwords()
+    warns = bw.get("warnings", [])
+    if n < 1 or n > len(warns):
+        await update.message.reply_text(f"❌ {n}-ogohlantirish yo'q!"); return
+    removed = warns.pop(n - 1)
+    save_badwords(bw)
+    await update.message.reply_text(f"✅ O'chirildi:\n_{removed}_", parse_mode="Markdown")
 
 async def cmd_skip(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin_or_superadmin(update.effective_user.id):
@@ -1920,7 +2626,6 @@ async def cmd_skip(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _save_q(update, context)
     else:
         await update.message.reply_text("⚠️ Hech narsa o'tkazilmadi.")
-
 
 async def cmd_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin_or_superadmin(update.effective_user.id):
@@ -1943,12 +2648,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     step = context.user_data.get("step")
     text = (update.message.text or "").strip()
 
-    # Guruhlarda: faqat o'yin javobini tekshirish (tracking alohida handler'da)
     if chat.type in ("group", "supergroup"):
         await _check_answer(update, context)
         return
 
-    # ── Sendas: botdan guruhga xabar (text) ──
     if step == "sendas_waiting" and is_superadmin(uid):
         target_cid = context.user_data.pop("sendas_chat", None)
         context.user_data.clear()
@@ -1960,27 +2663,21 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     message_id=update.message.message_id)
                 chats = load_chats()
                 name  = chats.get(str(target_cid), {}).get("name", str(target_cid))
-                await update.message.reply_text(
-                    f"✅ *{name}* guruhiga yuborildi!", parse_mode="Markdown")
+                await update.message.reply_text(f"✅ *{name}* guruhiga yuborildi!", parse_mode="Markdown")
             except Exception as e:
-                await update.message.reply_text(f"❌ Yuborib bo'lmadi:\n`{e}`",
-                                                parse_mode="Markdown")
+                await update.message.reply_text(f"❌ Yuborib bo'lmadi:\n`{e}`", parse_mode="Markdown")
         return
 
-    # ── Contact relay ──
     if step == "contact_waiting" and not is_admin_or_superadmin(uid):
         await _relay(update, context)
         return
 
-    # ── Broadcast: target tanlash ──
     if step == "broadcast_target" and is_superadmin(uid):
         if text in TARGET_KEYS:
             context.user_data["bc_target"] = TARGET_KEYS[text]
             context.user_data["step"]      = "broadcast_msg"
             await update.message.reply_text(
-                "📤 *Reklama xabarini yuboring:*\n"
-                "_(matn, rasm, video, fayl, stiker — barchasi qabul qilinadi)_\n\n"
-                "⏹ /cancel",
+                "📤 *Reklama xabarini yuboring:*\n⏹ /cancel",
                 parse_mode="Markdown",
                 reply_markup=ReplyKeyboardRemove())
         else:
@@ -1999,7 +2696,50 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _do_broadcast(update, context)
         return
 
-    # ── addadmin: UID kutish ──
+    # setprice step
+    if step == "setprice_input" and is_superadmin(uid):
+        tarif = context.user_data.pop("setprice_tarif", None)
+        context.user_data.pop("step", None)
+        if tarif:
+            try:
+                price = int(text)
+                cfg = load_config()
+                cfg.setdefault("tarif_prices", {})[tarif] = price
+                save_config(cfg)
+                await update.message.reply_text(
+                    f"✅ *{TARIF_NAMES[tarif]}* narxi: *{price} ⭐*",
+                    parse_mode="Markdown")
+            except ValueError:
+                await update.message.reply_text("❌ Raqam kiriting.")
+        return
+
+    # setchannel step
+    if step == "setchannel_input" and is_superadmin(uid):
+        context.user_data.pop("step", None)
+        try:
+            cid = int(text)
+        except ValueError:
+            await update.message.reply_text("❌ Kanal ID raqam bo'lishi kerak.")
+            return
+        if cid == 0:
+            set_sub_channel(None)
+            await update.message.reply_text("✅ Obuna kanali o'chirildi.")
+        else:
+            set_sub_channel(cid)
+            await update.message.reply_text(f"✅ Obuna kanali: `{cid}`", parse_mode="Markdown")
+        return
+
+    # class topic yaratish
+    if step == "create_class_topic" and is_superadmin(uid):
+        context.user_data.pop("step", None)
+        tid = await create_class_topic(context.bot, text)
+        if tid:
+            await update.message.reply_text(
+                f"✅ Sinf topici yaratildi: *{text}*\nID: `{tid}`", parse_mode="Markdown")
+        else:
+            await update.message.reply_text("❌ Topic yaratib bo'lmadi.")
+        return
+
     if step == "addadmin_uid" and is_admin_or_superadmin(uid):
         try:
             new_uid = int(text)
@@ -2011,8 +2751,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         adm = load_admins()
         if str(new_uid) in adm:
-            await update.message.reply_text(
-                f"⚠️ `{new_uid}` allaqachon admin!", parse_mode="Markdown")
+            await update.message.reply_text(f"⚠️ `{new_uid}` allaqachon admin!", parse_mode="Markdown")
             return
         max_tl = context.user_data.get("aa_max_tl", MAX_TOPICS)
         max_mq = context.user_data.get("aa_max_mq", MAX_QUESTIONS)
@@ -2023,18 +2762,16 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=_aa_tlimit_kb(max_tl))
         return
 
-    # ── addadmin: display name (text input) ──
     if step == "addadmin_dname" and is_superadmin(uid):
         name = None if text == "-" else text
         context.user_data["aa_dname"] = name
         context.user_data["step"]     = "addadmin_can_add"
         await update.message.reply_text(
-            f"🏷 Nom: *{name or '(yo\'q)'}*\n\nBu admin o'z adminlarini qo'sha oladimi?",
+            "🏷 Nom: *" + (name or "(yo'q)") + "*\n\nBu admin o'z adminlarini qo'sha oladimi?",
             parse_mode="Markdown",
             reply_markup=_aa_can_add_kb())
         return
 
-    # ── editadmin: display name (text input) ──
     if step == "editadmin_dname" and is_superadmin(uid):
         uid_e = context.user_data.pop("ea_uid", None)
         context.user_data.pop("step", None)
@@ -2046,7 +2783,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(msg, parse_mode="Markdown")
         return
 
-    # ── Topic access: custom input ──
     if step in ("newtopic_access_custom", "access_custom_input") and is_admin_or_superadmin(uid):
         tn = context.user_data.get("topic_name")
         t  = load_topic(tn)
@@ -2059,40 +2795,37 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.pop("step", None)
         s = ", ".join(str(a) for a in allowed) if allowed else "hech kim"
         await update.message.reply_text(
-            f"✅ *{tn}* access: ✏️ Qo'lda\n"
-            f"Ruxsat berilganlar: {s}\n_(+ siz va superadmin)_",
+            f"✅ *{tn}* access: ✏️ Qo'lda\nRuxsat berilganlar: {s}",
             parse_mode="Markdown")
         return
 
     if not is_admin_or_superadmin(uid):
         return
 
-    # ── bulkq ──
     if step == "bulkq_waiting":
         await _process_bulkq(update, context)
         return
 
-    # ── newtopic: emoji ──
     if step == "newtopic_emoji":
         name = context.user_data["topic_name"]
+        created_by = uid
         save_topic({
             "name":       name,
             "emoji":      text,
             "prize":      None,
-            "created_by": uid,
+            "created_by": created_by,
             "access":     {"type": "all", "allowed": []},
             "questions":  [],
         })
         context.user_data["step"] = "newtopic_access"
         await update.message.reply_text(
             f"✅ Topic yaratildi: {text} *{name}*\n\n"
-            "🔐 *Topicdan kimlar foydalana oladi?*\n"
-            "_(savol qo'shish va ko'rish huquqi)_",
+            "🔐 *Topicdan kimlar foydalana oladi?*",
             parse_mode="Markdown",
             reply_markup=_access_kb(name))
+        asyncio.create_task(auto_export(context.bot))
         return
 
-    # ── addq: savol matni ──
     if step == "addq_question" and text:
         context.user_data.update({"q_question": text, "step": "addq_answer"})
         await update.message.reply_text(
@@ -2100,10 +2833,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown")
         return
 
-    # ── addq: to'g'ri javob ──
     if step == "addq_answer":
-        context.user_data.update(
-            {"q_answer": text.lower(), "q_alts": [], "step": "addq_alts"})
+        context.user_data.update({"q_answer": text.lower(), "q_alts": [], "step": "addq_alts"})
         kb = InlineKeyboardMarkup([
             [IKB("➕ Alternativ javob",          callback_data="addq_alt")],
             [IKB("🖼 Rasm/Video/GIF/Stiker",      callback_data="addq_media")],
@@ -2114,7 +2845,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown", reply_markup=kb)
         return
 
-    # ── addq: alternativ ──
     if step == "addq_alt_text":
         context.user_data.setdefault("q_alts", []).append(text.lower())
         alts = context.user_data["q_alts"]
@@ -2140,7 +2870,6 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     step = context.user_data.get("step")
 
-    # Sendas: botdan guruhga xabar (media)
     if step == "sendas_waiting" and is_superadmin(uid):
         target_cid = context.user_data.pop("sendas_chat", None)
         context.user_data.clear()
@@ -2152,14 +2881,11 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     message_id=update.message.message_id)
                 chats = load_chats()
                 name  = chats.get(str(target_cid), {}).get("name", str(target_cid))
-                await update.message.reply_text(
-                    f"✅ *{name}* guruhiga yuborildi!", parse_mode="Markdown")
+                await update.message.reply_text(f"✅ *{name}* guruhiga yuborildi!", parse_mode="Markdown")
             except Exception as e:
-                await update.message.reply_text(f"❌ Yuborib bo'lmadi:\n`{e}`",
-                                                parse_mode="Markdown")
+                await update.message.reply_text(f"❌ Yuborib bo'lmadi:\n`{e}`", parse_mode="Markdown")
         return
 
-    # Contact relay
     if step == "contact_waiting" and not is_admin_or_superadmin(uid):
         await _relay(update, context)
         return
@@ -2167,12 +2893,10 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin_or_superadmin(uid):
         return
 
-    # Broadcast media
     if step == "broadcast_msg" and is_superadmin(uid):
         await _bc_received(update, context)
         return
 
-    # Restore
     if step == "restore_waiting" and is_superadmin(uid):
         if update.message.document:
             await _process_restore(update, context)
@@ -2180,7 +2904,6 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ JSON faylni yuboring.")
         return
 
-    # Prize
     if step == "setprize_waiting" and is_superadmin(uid):
         msg = update.message
         if msg.photo:
@@ -2198,11 +2921,9 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
             t["prize"] = prize
             save_topic(t)
         context.user_data.clear()
-        await update.message.reply_text(
-            f"✅ *{tn}* uchun sovrin saqlandi! 🏆", parse_mode="Markdown")
+        await update.message.reply_text(f"✅ *{tn}* uchun sovrin saqlandi! 🏆", parse_mode="Markdown")
         return
 
-    # Question media
     if step == "addq_media_waiting":
         msg = update.message
         if msg.photo:
@@ -2221,67 +2942,49 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
 # ══════════════════════════════════════════════════════
-#  GROUP MESSAGE TRACKER  (barcha guruh xabarlarini eslab qolish)
+#  GROUP TRACKER + PROFANITY + REACTION
 # ══════════════════════════════════════════════════════
 
 async def check_profanity(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Guruh xabarlarida yomon so'zlarni tekshirish va chora ko'rish."""
     msg  = update.message
     chat = update.effective_chat
     user = update.effective_user
     if not msg or not msg.text or not user:
         return
-    # Botlarni (shu jumladan boshqa botlar) o'tkazib yuboramiz
-    if user.is_bot:
+    if user.is_bot or user.id == SUPERADMIN:
         return
-    # Superadminni o'tkazib yuboramiz
-    if user.id == SUPERADMIN:
-        return
-
     bw      = load_badwords()
     text    = msg.text
     severe  = bw.get("severe_words", [])
     normal  = bw.get("words", [])
-
     has_severe = _has_badword(text, severe)
     has_normal = _has_badword(text, normal)
     if not has_severe and not has_normal:
         return
-
     warn_msg = _random_warning(bw.get("warnings", []))
     ulink    = f"[{user.first_name}](tg://user?id={user.id})"
-
-    # Bot adminmi?
     try:
         bm = await context.bot.get_chat_member(chat.id, context.bot.id)
         bot_adm = bm.status in ("administrator", "creator")
     except Exception:
         bot_adm = False
-
-    # User adminmi?
     try:
         um = await context.bot.get_chat_member(chat.id, user.id)
         usr_adm = um.status in ("administrator", "creator")
     except Exception:
         usr_adm = False
-
     if has_severe:
-        # ── Juda yomon so'z ──
         if bot_adm:
             try:
                 await msg.delete()
             except Exception:
                 pass
-
         if usr_adm:
-            # Admin: faqat ogohlantirish
             await context.bot.send_message(
                 chat.id,
-                f"🚫 {ulink}, *{warn_msg}*\n"
-                f"_(Admin bo'lsangizda ham bu so'z qabul qilinmaydi!)_",
+                f"🚫 {ulink}, *{warn_msg}*\n_(Admin bo'lsangizda ham!)_",
                 parse_mode="Markdown")
         else:
-            # Oddiy user: chiqarib yuborish
             kicked = False
             if bot_adm:
                 try:
@@ -2293,40 +2996,28 @@ async def check_profanity(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     logger.warning(f"Kick failed: {e}")
             await context.bot.send_message(
                 chat.id,
-                f"🚫 {ulink} guruhdan *chiqarib yuborildi!*\n"
-                f"*Sabab:* Juda qo'pol so'z ishlatish\n\n"
-                f"💬 _{warn_msg}_",
+                f"🚫 {ulink} guruhdan *chiqarib yuborildi!*\n*Sabab:* Juda qo'pol so'z\n\n💬 _{warn_msg}_",
                 parse_mode="Markdown")
-            _ = kicked  # noqa
-
-        # Superadminga bildirishnoma (saqlanmaydi)
         try:
             await context.bot.send_message(
                 SUPERADMIN,
-                f"🚨 *JUDA QO'POL SO'Z!*\n\n"
+                f"🚨 *QOPOL SO'Z!*\n\n"
                 f"👤 {ulink} | `{user.id}`"
                 + (f" | @{user.username}" if user.username else "")
                 + f"\n💬 Guruh: *{chat.title}* (`{chat.id}`)\n"
                   f"👮 User admin: {'✅' if usr_adm else '❌'}\n"
-                  f"🤖 Bot admin: {'✅' if bot_adm else '❌'}\n"
                   f"🦵 Kick: {'✅' if not usr_adm and bot_adm else '❌'}\n\n"
                   f"📝 Xabar: `{text[:300]}`",
                 parse_mode="Markdown")
         except Exception:
             pass
-
     elif has_normal:
-        # ── Oddiy yomon so'z ──
         if bot_adm:
             try:
                 await msg.delete()
             except Exception:
                 pass
-        await context.bot.send_message(
-            chat.id,
-            f"⚠️ {ulink}, {warn_msg}",
-            parse_mode="Markdown")
-
+        await context.bot.send_message(chat.id, f"⚠️ {ulink}, {warn_msg}", parse_mode="Markdown")
 
 async def group_tracker(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
@@ -2337,9 +3028,13 @@ async def group_tracker(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     u = update.effective_user
     if u:
-        track_msg(chat.id, msg.message_id, u.id, u.username,
-                  msg.date.timestamp())
-    # Profanity check
+        track_msg(chat.id, msg.message_id, u.id, u.username, msg.date.timestamp())
+
+        # 🔥 Reaksiya — tarif egalariga
+        tarif = get_user_tarif(u.id)
+        if tarif in (TARIF_PLUS, TARIF_PREMIUM, TARIF_VIP):
+            asyncio.create_task(send_fire_reaction(context.bot, chat.id, msg.message_id))
+
     if msg.text:
         await check_profanity(update, context)
 
@@ -2353,7 +3048,287 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid  = q.from_user.id
     data = q.data
 
-    # ── Sendas: guruh tanlash ──
+    # ── User menu ──
+    if data.startswith("u:") or data == "u:back":
+        await _handle_user_menu(q, uid, data, context)
+        return
+
+    # ── Tarif sotib olish ──
+    if data.startswith("buy:"):
+        tarif = data.split(":")[1]
+        if tarif not in (TARIF_PLUS, TARIF_PREMIUM, TARIF_VIP):
+            return
+        await q.message.delete()
+        await _send_invoice(context.bot, q.message.chat.id, tarif, uid)
+        return
+
+    # ── Superadmin menyu ──
+    if data.startswith("menu:"):
+        if not is_admin_or_superadmin(uid):
+            return
+        section = data.split(":")[1]
+
+        if section == "back":
+            if is_superadmin(uid):
+                await q.edit_message_text(
+                    "👑 Superadmin boshqaruv paneli:",
+                    reply_markup=_superadmin_main_kb())
+            return
+
+        if section == "topics":
+            topics = all_topics()
+            if not is_superadmin(uid):
+                uname = q.from_user.username
+                topics = [t for t in topics if can_manage_topic(t, uid, uname)]
+            if not topics:
+                await q.edit_message_text("📭 Topiclar yo'q.",
+                                          reply_markup=InlineKeyboardMarkup([[IKB("⬅️ Orqaga", callback_data="menu:back")]]))
+                return
+            lines = []
+            for t in topics:
+                mq = get_admin_max_questions(t.get("created_by", uid))
+                lines.append(f"{t['emoji']} *{t['name']}* — {len(t['questions'])}/{mq}")
+            btns = [[IKB(f"{t['emoji']} {t['name']}", callback_data=f"topic_detail:{t['name']}")] for t in topics]
+            btns.append([IKB("➕ Yangi topic", callback_data="menu:newtopic_prompt"),
+                         IKB("⬅️ Orqaga",     callback_data="menu:back")])
+            await q.edit_message_text(
+                f"📋 *Topiclar ({len(topics)} ta):*\n\n" + "\n".join(lines),
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(btns))
+            return
+
+        if section == "admins":
+            if is_superadmin(uid):
+                adm = load_admins()
+                if not adm:
+                    kb = InlineKeyboardMarkup([[IKB("➕ Admin qo'shish", callback_data="menu:addadmin_prompt"),
+                                               IKB("⬅️ Orqaga", callback_data="menu:back")]])
+                    await q.edit_message_text("👥 Admin yo'q.", reply_markup=kb)
+                    return
+                btns = [[IKB(f"⚙️ {k} ({v.get('display_name','—')})", callback_data=f"edit_adm:{k}")] for k, v in adm.items()]
+                btns.append([IKB("➕ Admin qo'shish", callback_data="menu:addadmin_prompt"),
+                             IKB("⬅️ Orqaga",        callback_data="menu:back")])
+                lines = [f"👤 `{k}` — topic:{v['topic_limit']} savol:{v.get('max_questions',MAX_QUESTIONS)}"
+                         for k, v in adm.items()]
+                await q.edit_message_text(
+                    f"👥 *Adminlar ({len(adm)} ta):*\n\n" + "\n".join(lines),
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup(btns))
+            return
+
+        if section == "users":
+            if not is_superadmin(uid):
+                return
+            users = load_users()
+            by_tarif = {}
+            for u in users.values():
+                t = u.get("tarif", TARIF_FREE)
+                by_tarif[t] = by_tarif.get(t, 0) + 1
+            lines = [f"• {TARIF_NAMES.get(t, t)}: {n} ta" for t, n in by_tarif.items()]
+            kb = InlineKeyboardMarkup([[IKB("⬅️ Orqaga", callback_data="menu:back")]])
+            await q.edit_message_text(
+                f"👤 *Jami: {len(users)} ta*\n\n" + "\n".join(lines),
+                parse_mode="Markdown", reply_markup=kb)
+            return
+
+        if section == "tarifs":
+            if not is_superadmin(uid):
+                return
+            await q.edit_message_text(
+                "💎 *Tarif sozlamalari:*",
+                parse_mode="Markdown",
+                reply_markup=_tarif_admin_kb())
+            return
+
+        if section == "export":
+            if not is_superadmin(uid):
+                return
+            await q.edit_message_text("📦 Export qilinmoqda...")
+            ok = await do_export(context.bot, to_backup_topic=True)
+            await q.edit_message_text(
+                "✅ Export muvaffaqiyatli!" if ok else "❌ Export xato!",
+                reply_markup=InlineKeyboardMarkup([[IKB("⬅️ Orqaga", callback_data="menu:back")]]))
+            return
+
+        if section == "forum":
+            if not is_superadmin(uid):
+                return
+            ft = get_forum_topics()
+            lines = [f"• `{k}` → ID: `{v}`" for k, v in ft.items()]
+            kb = InlineKeyboardMarkup([
+                [IKB("👑 VIP topic",     callback_data="ft:vip"),
+                 IKB("💎 Premium topic", callback_data="ft:premium")],
+                [IKB("✨ PLUS topic",    callback_data="ft:plus"),
+                 IKB("📦 Backup topic",  callback_data="ft:backup")],
+                [IKB("🏫 Sinf topici",   callback_data="ft:class")],
+                [IKB("⬅️ Orqaga",        callback_data="menu:back")],
+            ])
+            await q.edit_message_text(
+                "🏫 *Forum topiclar:*\n\n" + ("\n".join(lines) if lines else "Hali yo'q"),
+                parse_mode="Markdown", reply_markup=kb)
+            return
+
+        if section == "games":
+            if not is_superadmin(uid):
+                return
+            active = {cid: g for cid, g in games.items() if g.get("active")}
+            btns   = []
+            if active:
+                for cid, g in active.items():
+                    btns.append([IKB(f"⏹ {g['emoji']}{g['topic']} ({cid})",
+                                     callback_data=f"stopgame_ask:{cid}")])
+            btns.append([IKB("⬅️ Orqaga", callback_data="menu:back")])
+            await q.edit_message_text(
+                f"🎮 *Faol o'yinlar: {len(active)} ta*",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(btns))
+            return
+
+        if section == "settings":
+            if not is_superadmin(uid):
+                return
+            cur_ch = get_sub_channel()
+            kb = InlineKeyboardMarkup([
+                [IKB("📢 Obuna kanalini o'rnatish", callback_data="setchannel")],
+                [IKB("🔐 Admin talab (guruhlar)",   callback_data="menu:requireadmin")],
+                [IKB("📤 Botdan xabar yuborish",    callback_data="menu:sendas")],
+                [IKB("⬅️ Orqaga",                   callback_data="menu:back")],
+            ])
+            await q.edit_message_text(
+                f"⚙️ *Sozlamalar:*\n\n📢 Obuna kanali: `{cur_ch or 'belgilanmagan'}`",
+                parse_mode="Markdown", reply_markup=kb)
+            return
+
+        if section == "broadcast":
+            if not is_superadmin(uid):
+                return
+            context.user_data["step"] = "broadcast_target"
+            chats = load_chats()
+            by_t  = {}
+            for c in chats.values():
+                by_t[c["type"]] = by_t.get(c["type"], 0) + 1
+            stats = " | ".join(f"{t}:{n}" for t, n in by_t.items()) or "0"
+            await q.edit_message_text(
+                f"📢 *Reklama yuborish*\n\n💬 Chatlar: {stats}",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([
+                    [IKB("👥 Hammaga",         callback_data="bc_target:all")],
+                    [IKB("👤 Userlarga",        callback_data="bc_target:private")],
+                    [IKB("🏘 Guruhlarga",       callback_data="bc_target:groups")],
+                    [IKB("📢 Kanallarga",       callback_data="bc_target:channels")],
+                    [IKB("⬅️ Orqaga",           callback_data="menu:back")],
+                ]))
+            return
+
+        if section == "addq":
+            topics = [t for t in all_topics() if can_manage_topic(t, uid, q.from_user.username)]
+            if not topics:
+                await q.edit_message_text("❌ Topiclar yo'q.")
+                return
+            btns = [[IKB(f"{t['emoji']} {t['name']}", callback_data=f"addq_topic:{t['name']}")] for t in topics]
+            await q.edit_message_text("📚 Qaysi topicga savol?", reply_markup=InlineKeyboardMarkup(btns))
+            return
+
+        if section == "newgame":
+            topics = all_topics()
+            if not topics:
+                await q.edit_message_text("❌ Topic yo'q.")
+                return
+            btns = [[IKB(f"{t['emoji']} {t['name']}", callback_data=f"newgame_topic:{t['name']}")] for t in topics]
+            await q.edit_message_text("🎮 Qaysi topic?", reply_markup=InlineKeyboardMarkup(btns))
+            return
+
+        if section == "requireadmin":
+            if not is_superadmin(uid):
+                return
+            chats  = load_chats()
+            groups = {k: v for k, v in chats.items() if v.get("type") in ("group", "supergroup")}
+            if not groups:
+                await q.edit_message_text("❌ Guruh yo'q.")
+                return
+            btns = []
+            for k, v in groups.items():
+                req = v.get("require_admin", False)
+                s   = "🟢" if req else "🔴"
+                btns.append([IKB(f"{s} {v.get('name', k)}", callback_data=f"req_adm:{k}")])
+            btns.append([IKB("⬅️ Orqaga", callback_data="menu:settings")])
+            await q.edit_message_text(
+                "🔐 *Admin talab:*", parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(btns))
+            return
+
+        if section == "sendas":
+            if not is_superadmin(uid):
+                return
+            chats  = load_chats()
+            groups = {k: v for k, v in chats.items() if v.get("type") in ("group", "supergroup")}
+            if not groups:
+                await q.edit_message_text("❌ Guruh yo'q.")
+                return
+            btns = [[IKB(v.get("name", k), callback_data=f"sendas:{k}")] for k, v in groups.items()]
+            btns.append([IKB("⬅️ Orqaga", callback_data="menu:settings")])
+            await q.edit_message_text("📤 Qaysi guruhga?", reply_markup=InlineKeyboardMarkup(btns))
+            return
+
+        return
+
+    # ── Broadcast inline target ──
+    if data.startswith("bc_target:"):
+        if not is_superadmin(uid): return
+        target = data.split(":")[1]
+        context.user_data["bc_target"] = target
+        context.user_data["step"]      = "broadcast_msg"
+        await q.edit_message_text(
+            "📤 *Reklama xabarini yuboring:*\n_(matn, rasm, video — barchasi)_\n\n⏹ /cancel",
+            parse_mode="Markdown")
+        return
+
+    # ── Tarif narxi o'zgartirish ──
+    if data.startswith("setprice:"):
+        if not is_superadmin(uid): return
+        tarif = data.split(":")[1]
+        context.user_data["step"]         = "setprice_input"
+        context.user_data["setprice_tarif"] = tarif
+        await q.edit_message_text(
+            f"💰 *{TARIF_NAMES.get(tarif, tarif)}* uchun yangi narx (stars) kiriting:",
+            parse_mode="Markdown")
+        return
+
+    if data == "setchannel":
+        if not is_superadmin(uid): return
+        context.user_data["step"] = "setchannel_input"
+        cur = get_sub_channel()
+        await q.edit_message_text(
+            f"📢 Joriy obuna kanali: `{cur or 'belgilanmagan'}`\n\n"
+            "Kanal ID kiriting (masalan: `-100123456789`)\n"
+            "O'chirish uchun: `0`",
+            parse_mode="Markdown")
+        return
+
+    # ── Forum topic ──
+    if data.startswith("ft:"):
+        if not is_superadmin(uid): return
+        action = data.split(":")[1]
+        if action == "class":
+            context.user_data["step"] = "create_class_topic"
+            await q.edit_message_text(
+                "🏫 Sinf nomini yozing:\n_(masalan: `8A sinfi`, `9B sinfi`)_",
+                parse_mode="Markdown")
+            return
+        tarif_map = {"vip": TARIF_VIP, "premium": TARIF_PREMIUM, "plus": TARIF_PLUS}
+        if action in tarif_map:
+            tid = await get_tarif_topic_id(context.bot, tarif_map[action])
+            msg = f"✅ *{TARIF_NAMES[tarif_map[action]]}* topic ID: `{tid}`" if tid else "❌ Yaratib bo'lmadi."
+            await q.edit_message_text(msg, parse_mode="Markdown",
+                                      reply_markup=InlineKeyboardMarkup([[IKB("⬅️ Orqaga", callback_data="menu:forum")]]))
+        elif action == "backup":
+            tid = await get_backup_topic_id(context.bot)
+            msg = f"✅ Backup topic ID: `{tid}`" if tid else "❌ Yaratib bo'lmadi."
+            await q.edit_message_text(msg, parse_mode="Markdown",
+                                      reply_markup=InlineKeyboardMarkup([[IKB("⬅️ Orqaga", callback_data="menu:forum")]]))
+        return
+
+    # ── Sendas ──
     if data.startswith("sendas:"):
         if not is_superadmin(uid): return
         cid_str = data.split(":", 1)[1]
@@ -2363,12 +3338,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["step"]        = "sendas_waiting"
         context.user_data["sendas_chat"] = int(cid_str)
         await q.edit_message_text(
-            f"📤 *{name}* guruhiga xabar yuboring:\n\n"
-            "_(Matn, rasm, video, stiker, fayl — barchasi qabul qilinadi)_\n\n"
-            "⏹ /cancel", parse_mode="Markdown")
+            f"📤 *{name}* guruhiga xabar yuboring:\n\n⏹ /cancel", parse_mode="Markdown")
         return
 
-    # ── Require admin: toggle ──
+    # ── Require admin ──
     if data.startswith("req_adm:"):
         if not is_superadmin(uid): return
         cid_str = data.split(":", 1)[1]
@@ -2381,18 +3354,15 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_chats(chats)
         name   = chats[cid_str].get("name", cid_str)
         status = "🟢 YONIQ" if new_val else "🔴 O'CHIQ"
-        # Rebuild requireadmin list
-        groups = {k: v for k, v in chats.items()
-                  if v.get("type") in ("group", "supergroup")}
+        groups = {k: v for k, v in chats.items() if v.get("type") in ("group", "supergroup")}
         btns = []
         for k, v in groups.items():
             req = v.get("require_admin", False)
             s   = "🟢" if req else "🔴"
             btns.append([IKB(f"{s} {v.get('name', k)}", callback_data=f"req_adm:{k}")])
-        btns.append([IKB("✅ Tayyor", callback_data="req_adm_done")])
+        btns.append([IKB("⬅️ Orqaga", callback_data="menu:settings")])
         await q.edit_message_text(
-            f"✅ *{name}* — Admin talab: {status}\n\n"
-            "🔐 *Guruhlar — Admin talab:*\n_(Bosib yoqing/o'chiring)_",
+            f"✅ *{name}* — {status}",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(btns))
         return
@@ -2402,23 +3372,19 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text("✅ Sozlamalar saqlandi.")
         return
 
-    # ── Topic access set ──
+    # ── Topic access ──
     if data.startswith("acc:"):
         if not is_admin_or_superadmin(uid): return
         _, at, tn = data.split(":", 2)
         t = load_topic(tn)
         if not t: await q.edit_message_text("❌ Topic topilmadi."); return
         if not can_edit_topic_access(t, uid):
-            await q.answer("❌ Faqat topic egasi yoki superadmin "
-                          "ruxsatni o'zgartira oladi!", show_alert=True); return
+            await q.answer("❌ Ruxsat yo'q!", show_alert=True); return
         if at == "custom":
             context.user_data["topic_name"] = tn
             context.user_data["step"]       = "access_custom_input"
             await q.edit_message_text(
-                f"✏️ *{tn}* — ruxsat beriladigan userlarni kiriting:\n\n"
-                "Format: `@username` yoki `123456789`\n"
-                "_(probel yoki yangi qator bilan ajrating)_\n\n"
-                "Misol: `@ali @vali 123456789`",
+                f"✏️ *{tn}* — ruxsat beriladiganlar:\n\n`@username` yoki `123456789`",
                 parse_mode="Markdown")
         else:
             t["access"] = {"type": at, "allowed": []}
@@ -2428,22 +3394,20 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="Markdown")
         return
 
-    # ── edittopicaccess selector ──
     if data.startswith("eta:"):
         if not is_admin_or_superadmin(uid): return
         tn = data.split(":", 1)[1]
         t  = load_topic(tn)
         if not t: return
         if not can_edit_topic_access(t, uid):
-            await q.answer("❌ Faqat topic egasi yoki superadmin "
-                          "ruxsatni o'zgartira oladi!", show_alert=True); return
+            await q.answer("❌ Faqat topic egasi!", show_alert=True); return
         cur = ACCESS_LABELS.get(t.get("access", {}).get("type", "all"), "—")
         await q.edit_message_text(
             f"🔐 *{tn}* — hozir: {cur}\n\nYangi access:",
             parse_mode="Markdown", reply_markup=_access_kb(tn))
         return
 
-    # ── editadmin: topic limit ──
+    # ── editadmin ──
     if data.startswith("eal_t:"):
         if not is_superadmin(uid): return
         _, uid_e, val = data.split(":")
@@ -2452,13 +3416,11 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if str(uid_e) not in adm: return
         adm[str(uid_e)]["topic_limit"] = val
         save_admins(adm)
-        await q.edit_message_text(
-            _editadmin_txt(uid_e, adm[str(uid_e)]),
-            parse_mode="Markdown",
-            reply_markup=_editadmin_kb(uid_e, adm[str(uid_e)]))
+        await q.edit_message_text(_editadmin_txt(uid_e, adm[str(uid_e)]),
+                                  parse_mode="Markdown",
+                                  reply_markup=_editadmin_kb(uid_e, adm[str(uid_e)]))
         return
 
-    # ── editadmin: max_questions ──
     if data.startswith("eal_q:"):
         if not is_superadmin(uid): return
         _, uid_e, val = data.split(":")
@@ -2467,47 +3429,40 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if str(uid_e) not in adm: return
         adm[str(uid_e)]["max_questions"] = val
         save_admins(adm)
-        await q.edit_message_text(
-            _editadmin_txt(uid_e, adm[str(uid_e)]),
-            parse_mode="Markdown",
-            reply_markup=_editadmin_kb(uid_e, adm[str(uid_e)]))
+        await q.edit_message_text(_editadmin_txt(uid_e, adm[str(uid_e)]),
+                                  parse_mode="Markdown",
+                                  reply_markup=_editadmin_kb(uid_e, adm[str(uid_e)]))
         return
 
-    # ── editadmin: display name tugmasi ──
     if data.startswith("eal_dn:"):
         if not is_superadmin(uid): return
         uid_e = int(data.split(":")[1])
         context.user_data["step"]   = "editadmin_dname"
         context.user_data["ea_uid"] = uid_e
         await q.edit_message_text(
-            f"🏷 `{uid_e}` uchun yangi nom yozing:\n_(o'chirish: `-`)_",
+            f"🏷 `{uid_e}` uchun yangi nom:\n_(o'chirish: `-`)_",
             parse_mode="Markdown")
         return
 
-    # ── editadmin: open ──
     if data.startswith("edit_adm:"):
         if not is_superadmin(uid): return
         uid_e = int(data.split(":")[1])
         adm   = load_admins()
         if str(uid_e) not in adm: return
-        await q.edit_message_text(
-            _editadmin_txt(uid_e, adm[str(uid_e)]),
-            parse_mode="Markdown",
-            reply_markup=_editadmin_kb(uid_e, adm[str(uid_e)]))
+        await q.edit_message_text(_editadmin_txt(uid_e, adm[str(uid_e)]),
+                                  parse_mode="Markdown",
+                                  reply_markup=_editadmin_kb(uid_e, adm[str(uid_e)]))
         return
 
-    # ── editadmin: delete ──
     if data.startswith("del_adm:"):
         if not is_superadmin(uid): return
         uid_e = int(data.split(":")[1])
         adm   = load_admins()
         adm.pop(str(uid_e), None)
         save_admins(adm)
-        await q.edit_message_text(
-            f"✅ `{uid_e}` adminlikdan olib tashlandi.", parse_mode="Markdown")
+        await q.edit_message_text(f"✅ `{uid_e}` adminlikdan olib tashlandi.", parse_mode="Markdown")
         return
 
-    # ── listadmins back ──
     if data == "list_adm_cb":
         if not is_superadmin(uid): return
         adm = load_admins()
@@ -2521,13 +3476,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             lines.append(f"👤 `{k}` [{dn}] topic:{owned}/{v['topic_limit']}")
             btns.append([IKB(f"⚙️ {k}", callback_data=f"edit_adm:{k}")])
         await q.edit_message_text(
-            f"👥 *Adminlar ({len(adm)} ta):*\n\n" + "\n".join(lines),
+            f"👥 *Adminlar:*\n\n" + "\n".join(lines),
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(btns))
         return
 
-    # ══ addadmin multi-step ══
-
+    # ── addadmin steps ──
     if data.startswith("aa_t:"):
         if not is_admin_or_superadmin(uid): return
         val = int(data.split(":")[1])
@@ -2545,9 +3499,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         val = int(data.split(":")[1])
         context.user_data["aa_mq"] = val
         by = context.user_data.get("aa_by", uid)
-
         if is_superadmin(by):
-            # Superadmin: display name so'rash
             context.user_data["step"] = "addadmin_dname"
             kb = InlineKeyboardMarkup([
                 [IKB("⏩ O'tkazib yuborish", callback_data="aa_skip_dn")],
@@ -2555,23 +3507,18 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ])
             await q.edit_message_text(
                 f"📁 {context.user_data.get('aa_tl')} ta | ❓ {val} ta\n\n"
-                "🏷 *Display name kiriting:*\n"
-                "_(masalan: 🌟 Ali aka — har joyda shu ko'rinadi)_\n"
-                "O'tkazib yuborish uchun pastdagi tugma.",
+                "🏷 *Display name:*\n_(o'tkazish uchun tugma bosing)_",
                 parse_mode="Markdown", reply_markup=kb)
         else:
-            # Sub-admin: to'g'ridan saqlash (display name, can_add yo'q)
-            await _finalize_addadmin(q, context, by,
-                                     display_name=None, can_add=False, sub_s={})
+            await _finalize_addadmin(q, context, by, display_name=None, can_add=False, sub_s={})
         return
 
     if data == "aa_skip_dn":
         if not is_superadmin(uid): return
         context.user_data["aa_dname"] = None
         context.user_data["step"]     = "addadmin_can_add"
-        await q.edit_message_text(
-            "Bu admin o'z adminlarini qo'sha oladimi?",
-            reply_markup=_aa_can_add_kb())
+        await q.edit_message_text("Bu admin o'z adminlarini qo'sha oladimi?",
+                                  reply_markup=_aa_can_add_kb())
         return
 
     if data.startswith("aa_ca:"):
@@ -2584,7 +3531,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             context.user_data["step"] = "addadmin_sub_cnt"
             await q.edit_message_text(
-                "👥 *Bu admin max nechta sub-admin qo'sha oladi?*",
+                "👥 *Max nechta sub-admin qo'sha oladi?*",
                 reply_markup=_aa_cnt_kb())
         return
 
@@ -2594,7 +3541,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["aa_sub_ma"] = val
         context.user_data["step"]      = "addadmin_sub_tl"
         await q.edit_message_text(
-            f"👥 Max sub-admin: *{val}* ta\n\n📁 *Sub-adminlar uchun max topic limiti:*",
+            f"👥 Max sub-admin: *{val}* ta\n\n📁 *Sub-admin topic limiti:*",
             parse_mode="Markdown", reply_markup=_aa_sub_tl_kb())
         return
 
@@ -2604,7 +3551,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["aa_sub_tl"] = val
         context.user_data["step"]      = "addadmin_sub_ql"
         await q.edit_message_text(
-            f"📁 Sub-admin topic: *{val}* ta\n\n❓ *Sub-adminlar uchun max savol limiti:*",
+            f"📁 Sub-admin topic: *{val}* ta\n\n❓ *Sub-admin savol limiti:*",
             parse_mode="Markdown", reply_markup=_aa_sub_ql_kb())
         return
 
@@ -2626,16 +3573,14 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text("❌ Admin qo'shish bekor qilindi.")
         return
 
-    # ══ addq ══
-
+    # ── addq ──
     if data.startswith("addq_topic:"):
-        if not is_admin_or_superadmin(uid): return
         name = data.split(":", 1)[1]
         t    = load_topic(name)
         if not t: return
-        if not can_manage_topic(t, uid, q.from_user.username):
+        if not can_manage_topic(t, uid, q.from_user.username) and t.get("created_by") != uid:
             await q.answer("❌ Ruxsat yo'q!", show_alert=True); return
-        mq = get_admin_max_questions(uid)
+        mq = get_admin_max_questions(uid) if is_admin_or_superadmin(uid) else get_user_q_limit(uid)
         if len(t["questions"]) >= mq:
             await q.edit_message_text(f"❌ Limit: {mq} ta savol!"); return
         context.user_data.clear()
@@ -2647,48 +3592,42 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "bulkq_more":
         if not is_admin_or_superadmin(uid): return
-        tn    = context.user_data.get("topic_name", "?")
-        t     = load_topic(tn)
-        mq    = get_admin_max_questions(uid)
-        rem   = mq - len(t["questions"]) if t else 0
+        tn  = context.user_data.get("topic_name", "?")
+        t   = load_topic(tn)
+        mq  = get_admin_max_questions(uid)
+        rem = mq - len(t["questions"]) if t else 0
         await q.edit_message_text(
             f"📥 Savollarni yuboring ({rem} ta qolgan):\n\n`apple - olma`",
             parse_mode="Markdown")
         return
 
     if data == "addq_alt":
-        if not is_admin_or_superadmin(uid): return
         context.user_data["step"] = "addq_alt_text"
-        await q.edit_message_text("✏️ Alternativ javobni yozing:", parse_mode="Markdown")
+        await q.edit_message_text("✏️ Alternativ javobni yozing:")
         return
 
     if data == "addq_media":
-        if not is_admin_or_superadmin(uid): return
         context.user_data["step"] = "addq_media_waiting"
         await q.edit_message_text(
-            "🖼 *Rasm, video, GIF yoki stiker yuboring:*\n_(o'tkazish: /skip)_",
+            "🖼 *Rasm, video, GIF yoki stiker:*\n_(o'tkazish: /skip)_",
             parse_mode="Markdown")
         return
 
     if data == "addq_save_nomedia":
-        if not is_admin_or_superadmin(uid): return
         context.user_data.update({"q_media_type": "none", "q_file_id": None})
         await _save_q(update, context)
         return
 
     if data == "addq_continue":
-        if not is_admin_or_superadmin(uid): return
         context.user_data["step"] = "addq_question"
-        await q.edit_message_text("📝 Keyingi savol matnini yozing:", parse_mode="Markdown")
+        await q.edit_message_text("📝 Keyingi savol matnini yozing:")
         return
 
     if data == "addq_finish":
-        if not is_admin_or_superadmin(uid): return
         tn = context.user_data.get("topic_name", "?")
         context.user_data.clear()
-        await q.edit_message_text(
-            f"✅ *Tugatildi!*\n`/listtopics` bilan ko'ring.",
-            parse_mode="Markdown")
+        await q.edit_message_text(f"✅ *Tugatildi!*\n`/listtopics` bilan ko'ring.",
+                                  parse_mode="Markdown")
         return
 
     # ── deltopic ──
@@ -2702,6 +3641,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if g.get("topic") == name:
                 g["active"] = False
         await q.edit_message_text(f"🗑 *{name}* o'chirildi.", parse_mode="Markdown")
+        asyncio.create_task(auto_export(context.bot))
         return
 
     if data == "deltopic_no":
@@ -2719,7 +3659,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown")
         return
 
-    # ── listgames stop ──
+    # ── games ──
     if data.startswith("stopgame_ask:"):
         if not is_superadmin(uid): return
         cid = int(data.split(":")[1])
@@ -2755,6 +3695,55 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text("❌ Bekor qilindi.")
         return
 
+    if data.startswith("newgame_topic:"):
+        tn   = data.split(":", 1)[1]
+        chat = q.message.chat
+        if chat.type not in ("group", "supergroup"):
+            await q.answer("❌ Faqat guruhlarda!", show_alert=True)
+            return
+        t = load_topic(tn)
+        if not t or not t["questions"]:
+            await q.answer("❌ Bu topicda savollar yo'q!", show_alert=True)
+            return
+        cid = chat.id
+        g   = get_game(cid)
+        if g["active"]:
+            await q.answer(f"⚠️ Allaqachon o'yin bor!", show_alert=True)
+            return
+        qs = t["questions"].copy()
+        random.shuffle(qs)
+        g.update({"active": True, "topic": tn, "emoji": t["emoji"],
+                  "questions": qs, "asked": 0, "current": None,
+                  "current_msg_id": None, "scores": {}, "waiting": False})
+        await q.edit_message_text(
+            f"🎮 *O'YIN BOSHLANDI!*\n\n{t['emoji']} *{tn.capitalize()}*\n"
+            f"📊 {len(qs)} ta savol",
+            parse_mode="Markdown")
+        await send_question(cid, context)
+        return
+
+    if data.startswith("topic_detail:"):
+        name = data.split(":", 1)[1]
+        t    = load_topic(name)
+        if not t:
+            await q.edit_message_text("❌ Topic topilmadi.")
+            return
+        mq  = get_admin_max_questions(uid)
+        acc = ACCESS_LABELS.get(t.get("access", {}).get("type", "all"), "—")
+        kb  = InlineKeyboardMarkup([
+            [IKB("📝 Savol qo'sh",    callback_data=f"addq_topic:{name}"),
+             IKB("🔐 Access",         callback_data=f"eta:{name}")],
+            [IKB("🗑 O'chirish",      callback_data=f"deltopic:{name}"),
+             IKB("⬅️ Orqaga",         callback_data="menu:topics")],
+        ])
+        await q.edit_message_text(
+            f"{t['emoji']} *{name}*\n\n"
+            f"❓ Savollar: {len(t['questions'])}/{mq}\n"
+            f"🔐 Access: {acc}\n"
+            f"👤 Yaratgan: `{t.get('created_by', '?')}`",
+            parse_mode="Markdown", reply_markup=kb)
+        return
+
 # ══════════════════════════════════════════════════════
 #  CHAT MEMBER
 # ══════════════════════════════════════════════════════
@@ -2772,19 +3761,17 @@ async def handle_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TY
         unregister_chat(chat.id)
 
 # ══════════════════════════════════════════════════════
-#  MAIN  (webhook rejimi — Render + UptimeRobot)
+#  MAIN
 # ══════════════════════════════════════════════════════
 
 async def run_bot():
     if not WEBHOOK_URL:
         raise SystemExit(
             "❌ WEBHOOK_URL topilmadi! Render → Environment'da "
-            "WEBHOOK_URL=https://<app-nomi>.onrender.com kabi qo'shing "
-            "(yoki Render avtomatik beradigan RENDER_EXTERNAL_URL ishlatiladi).")
+            "WEBHOOK_URL=https://<app-nomi>.onrender.com qo'shing.")
 
     app = Application.builder().token(BOT_TOKEN).build()
 
-    # Commands
     cmds = [
         ("start",           cmd_start),
         ("contact",         cmd_contact),
@@ -2819,22 +3806,35 @@ async def run_bot():
         ("broadcast",       cmd_broadcast),
         ("export",          cmd_export),
         ("restore",         cmd_restore),
+        # Yangi komandalar
+        ("setprice",        cmd_setprice),
+        ("setchannel",      cmd_setchannel),
+        ("delmsgs",         cmd_delmsgs),
+        ("delbotmsg",       cmd_delbotmsg),
+        ("createtopic",     cmd_createtopic),
+        ("userinfo",        cmd_userinfo),
+        ("listusers",       cmd_listusers),
     ]
     for name, handler in cmds:
         app.add_handler(CommandHandler(name, handler))
 
     app.add_handler(CallbackQueryHandler(callback_handler))
+    app.add_handler(PreCheckoutQueryHandler(cmd_precheckout))
 
-    # Guruh xabarlarini track qilish (barcha turlar, /del uchun) — group=0
+    # Guruh xabarlarini track qilish — group=0
     app.add_handler(MessageHandler(
         filters.ChatType.GROUPS & ~filters.COMMAND,
         group_tracker,
     ), group=0)
-
-    # Guruh komandalarini ham track qilish
     app.add_handler(MessageHandler(
         filters.ChatType.GROUPS & filters.COMMAND,
         group_tracker,
+    ), group=0)
+
+    # Stars to'lov — group=0
+    app.add_handler(MessageHandler(
+        filters.SUCCESSFUL_PAYMENT,
+        cmd_successful_payment,
     ), group=0)
 
     # Media handler (private) — group=1
@@ -2858,11 +3858,9 @@ async def run_bot():
 
     await app.initialize()
 
-    # ── Avtomatik tiklash (Render kabi vaqtinchalik diskdan keyin) ──
-    logger.info("Zahiradan avtomatik tiklash tekshirilmoqda...")
+    logger.info("Zahiradan avtomatik tiklash...")
     await auto_restore_on_startup(app.bot)
 
-    # ── HTTP server (webhook + health-check) ──
     async def telegram_webhook(request: web.Request) -> web.Response:
         if WEBHOOK_SECRET:
             secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
@@ -2877,9 +3875,7 @@ async def run_bot():
         return web.Response()
 
     async def health(request: web.Request) -> web.Response:
-        # Render health-check va UptimeRobot shu yerga GET so'rov yuboradi —
-        # bu botni "uxlab qolishdan" saqlaydi.
-        return web.Response(text="🤖 Lang Bot ishlamoqda")
+        return web.Response(text="🤖 Lang Bot v5.0 ishlamoqda")
 
     web_app = web.Application()
     web_app.router.add_get("/", health)
@@ -2890,9 +3886,8 @@ async def run_bot():
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", PORT)
     await site.start()
-    logger.info(f"HTTP server ishga tushdi: 0.0.0.0:{PORT}")
+    logger.info(f"HTTP server: 0.0.0.0:{PORT}")
 
-    # ── Telegramga webhookni o'rnatish ──
     webhook_url = f"{WEBHOOK_URL}/{WEBHOOK_PATH}"
     await app.bot.set_webhook(
         url=webhook_url,
@@ -2900,25 +3895,21 @@ async def run_bot():
         drop_pending_updates=True,
         allowed_updates=Update.ALL_TYPES,
     )
-    logger.info(f"Webhook o'rnatildi: {webhook_url}")
+    logger.info(f"Webhook: {webhook_url}")
 
-    # Kunlik 00:00 export (Toshkent vaqti)
     if app.job_queue:
         app.job_queue.run_daily(
             daily_export_job,
             time=dt_time(0, 0, 0, tzinfo=TZ),
             name="daily_export",
         )
-        logger.info("Daily export scheduled: 00:00 Tashkent")
-    else:
-        logger.warning("JobQueue not available! "
-                       "Install: pip install 'python-telegram-bot[job-queue]==21.9'")
+        logger.info("Daily export: 00:00 Toshkent")
 
     await app.start()
-    logger.info("Bot ishga tushdi (webhook rejimi).")
+    logger.info("Bot ishga tushdi (v5.0).")
 
     try:
-        await asyncio.Event().wait()  # to'xtatilguncha kutib turish
+        await asyncio.Event().wait()
     finally:
         logger.info("Bot to'xtatilmoqda...")
         await app.stop()
