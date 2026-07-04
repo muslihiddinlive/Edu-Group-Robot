@@ -95,12 +95,14 @@ class FakeCallbackQuery:
         self.message = FakeMessage(chat=FakeChat(chat_id=chat_id))
         self.answered = False
         self.edits = []
+        self.last_markup = None
 
     async def answer(self, *a, **kw):
         self.answered = True
 
-    async def edit_message_text(self, text, **kwargs):
+    async def edit_message_text(self, text, reply_markup=None, **kwargs):
         self.edits.append(text)
+        self.last_markup = reply_markup
 
 
 class FakeCallbackUpdate:
@@ -353,3 +355,76 @@ async def test_buy_tarif_invoice_failure_keeps_message_and_reports_error(
 
     assert update.callback_query.message.deleted is False
     assert update.callback_query.message.replies, "xato haqida xabar berilmadi"
+
+
+# ══════════════════════════════════════════════════════
+# Section 3 — regressions for the empty-topic-list bug found on 2026-07-04
+#   (the "➕ Yangi topic" button vanished entirely when the topic list was
+#    empty — the exact situation on a fresh DB — for both admins and users;
+#    and regular users never had a create-topic button anywhere at all)
+# ══════════════════════════════════════════════════════
+
+@pytest.mark.asyncio
+async def test_superadmin_sees_create_button_when_topic_list_empty(
+        bot, make_callback_update, make_context):
+    ctx = make_context(bot=AsyncMock())
+    update = make_callback_update(bot.SUPERADMIN, "menu:topics")
+
+    await bot.callback_handler(update, ctx)
+
+    kb = update.callback_query.edits  # we only track text, need markup too
+    # inspect the markup that was actually passed
+    assert update.callback_query.last_markup is not None
+    flat = [btn.callback_data for row in update.callback_query.last_markup.inline_keyboard for btn in row]
+    assert "menu:newtopic_prompt" in flat
+
+
+@pytest.mark.asyncio
+async def test_regular_user_sees_create_button_when_no_topics(
+        bot, make_callback_update, make_context):
+    ctx = make_context(bot=AsyncMock())
+    update = make_callback_update(REGULAR_USER, "u:topics")
+
+    await bot.callback_handler(update, ctx)
+
+    flat = [btn.callback_data for row in update.callback_query.last_markup.inline_keyboard for btn in row]
+    assert "u:newtopic" in flat
+
+
+@pytest.mark.asyncio
+async def test_regular_user_newtopic_button_starts_flow(
+        bot, make_callback_update, make_context):
+    ctx = make_context(bot=AsyncMock())
+    update = make_callback_update(REGULAR_USER, "u:newtopic")
+
+    await bot.callback_handler(update, ctx)
+
+    assert ctx.user_data.get("step") == "newtopic_name_prompt"
+
+
+@pytest.mark.asyncio
+async def test_regular_user_newtopic_blocked_when_limit_reached(
+        bot, make_callback_update, make_context):
+    bot.save_user(REGULAR_USER, {"tarif": bot.TARIF_FREE, "referral_count": 0})
+    bot.save_topic({"name": "already1", "emoji": "📘", "created_by": REGULAR_USER,
+                     "access": {"type": "all", "allowed": []}, "questions": []})
+    ctx = make_context(bot=AsyncMock())
+    update = make_callback_update(REGULAR_USER, "u:newtopic")
+
+    await bot.callback_handler(update, ctx)
+
+    assert ctx.user_data.get("step") != "newtopic_name_prompt"
+    assert "limit to'ldi" in update.callback_query.edits[-1]
+
+
+@pytest.mark.asyncio
+async def test_regular_user_can_type_name_via_newtopic_name_prompt(
+        bot, make_text_update, make_context):
+    ctx = make_context()
+    ctx.user_data["step"] = "newtopic_name_prompt"
+    update = make_text_update(REGULAR_USER, "geography")
+
+    await bot.handle_text(update, ctx)
+
+    assert ctx.user_data.get("step") == "newtopic_emoji"
+    assert ctx.user_data.get("topic_name") == "geography"

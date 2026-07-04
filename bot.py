@@ -1339,7 +1339,8 @@ def _user_main_kb(uid: int) -> InlineKeyboardMarkup:
         [IKB("💎 Tarifim",        callback_data="u:tarif"),
          IKB("👥 Referallarim",   callback_data="u:referral")],
         [IKB("📋 Topiclarim",     callback_data="u:topics"),
-         IKB("📨 Adminга murojaat", callback_data="u:contact")],
+         IKB("➕ Yangi topic",    callback_data="u:newtopic")],
+        [IKB("📨 Adminga murojaat", callback_data="u:contact")],
     ]
     if tarif == TARIF_FREE:
         rows.append([IKB("🛒 Tarif sotib olish", callback_data="u:buy")])
@@ -1502,7 +1503,10 @@ async def _handle_user_menu(q, uid: int, data: str, context: ContextTypes.DEFAUL
     if data == "u:topics":
         topics = [t for t in all_topics() if t.get("created_by") == uid]
         if not topics:
-            kb = InlineKeyboardMarkup([[IKB("⬅️ Orqaga", callback_data="u:back")]])
+            kb = InlineKeyboardMarkup([
+                [IKB("➕ Yangi topic", callback_data="u:newtopic")],
+                [IKB("⬅️ Orqaga",     callback_data="u:back")],
+            ])
             await q.edit_message_text("📭 Sizning topiclaringiz yo'q.",
                                       reply_markup=kb)
             return
@@ -1512,6 +1516,29 @@ async def _handle_user_menu(q, uid: int, data: str, context: ContextTypes.DEFAUL
         await q.edit_message_text(
             f"📋 *Topiclaringiz ({len(topics)} ta):*\n\n" + "\n".join(lines),
             parse_mode="Markdown", reply_markup=kb)
+        return
+
+    if data == "u:newtopic":
+        if not is_admin_or_superadmin(uid):
+            t_lim = get_user_topic_limit(uid)
+            owned = count_admin_topics(uid)
+            if owned >= t_lim:
+                kb = InlineKeyboardMarkup([
+                    [IKB("🛒 Tarif xarid qilish", callback_data="u:buy")],
+                    [IKB("⬅️ Orqaga",             callback_data="u:back")],
+                ])
+                await q.edit_message_text(
+                    f"❌ Topic limit to'ldi! ({owned}/{t_lim})\n\n"
+                    "Qo'shimcha topic uchun:\n"
+                    "• Referal to'plang (+1 har 3 ta)\n"
+                    "• Tarif xarid qiling",
+                    reply_markup=kb)
+                return
+        context.user_data.clear()
+        context.user_data["step"] = "newtopic_name_prompt"
+        await q.edit_message_text(
+            "➕ *Yangi topic*\n\nTopic nomini yuboring _(faqat harf/raqam/_, masalan: `english`)_",
+            parse_mode="Markdown")
         return
 
     if data == "u:contact":
@@ -2844,7 +2871,15 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown")
         return
 
-    if step == "newtopic_name_prompt" and is_admin_or_superadmin(uid):
+    if step == "newtopic_name_prompt":
+        if not is_admin_or_superadmin(uid):
+            t_lim = get_user_topic_limit(uid)
+            owned = count_admin_topics(uid)
+            if owned >= t_lim:
+                context.user_data.pop("step", None)
+                await update.message.reply_text(
+                    f"❌ Topic limit to'ldi! ({owned}/{t_lim})")
+                return
         name = text.lower().strip()
         if not name.replace("_", "").isalnum():
             await update.message.reply_text("❌ Nom: harf, raqam, _ bo'lsin.")
@@ -3158,8 +3193,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 uname = q.from_user.username
                 topics = [t for t in topics if can_manage_topic(t, uid, uname)]
             if not topics:
-                await q.edit_message_text("📭 Topiclar yo'q.",
-                                          reply_markup=InlineKeyboardMarkup([[IKB("⬅️ Orqaga", callback_data="menu:back")]]))
+                await q.edit_message_text(
+                    "📭 Topiclar yo'q.",
+                    reply_markup=InlineKeyboardMarkup([
+                        [IKB("➕ Yangi topic", callback_data="menu:newtopic_prompt")],
+                        [IKB("⬅️ Orqaga",     callback_data="menu:back")],
+                    ]))
                 return
             lines = []
             for t in topics:
