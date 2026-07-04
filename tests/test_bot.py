@@ -39,6 +39,7 @@ def bot(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
 
     sys.modules.pop("bot", None)
+    sys.modules.pop("core", None)
     module = importlib.import_module("bot")
 
     # Never schedule real background export/backup work during tests.
@@ -47,6 +48,7 @@ def bot(tmp_path, monkeypatch):
     yield module
 
     sys.modules.pop("bot", None)
+    sys.modules.pop("core", None)
 
 
 class FakeUser:
