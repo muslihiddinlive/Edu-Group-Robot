@@ -138,6 +138,41 @@ ACCESS_LABELS = {
 os.makedirs(TOPICS_DIR, exist_ok=True)
 
 # ══════════════════════════════════════════════════════
+#  AUTO-BACKUP HOOK (har qanday o'zgarishda avtomatik export)
+# ══════════════════════════════════════════════════════
+_BOT_REF = None
+_RESTORING = False
+_suppress_export_hook = False
+_export_task = None
+EXPORT_DEBOUNCE_SECONDS = 3.0
+
+async def _debounced_export_runner(delay: float):
+    global _export_task
+    try:
+        await asyncio.sleep(delay)
+        if _BOT_REF is not None:
+            await do_export(_BOT_REF, to_backup_topic=True)
+    except asyncio.CancelledError:
+        pass
+    except Exception as e:
+        logger.warning(f"Auto-backup (debounced) xato: {e}")
+
+def mark_changed():
+    """Har qanday saqlanadigan ma'lumot o'zgarganda chaqiriladi.
+    3 soniyalik debounce bilan — ketma-ket tez o'zgarishlarda faqat
+    bitta yangi backup fayl yaratiladi (Telegram flood limitidan qochish uchun)."""
+    global _export_task
+    if _RESTORING or _suppress_export_hook or _BOT_REF is None:
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    if _export_task and not _export_task.done():
+        _export_task.cancel()
+    _export_task = loop.create_task(_debounced_export_runner(EXPORT_DEBOUNCE_SECONDS))
+
+# ══════════════════════════════════════════════════════
 #  FILE HELPERS
 # ══════════════════════════════════════════════════════
 
@@ -150,6 +185,7 @@ def _jload(path: str) -> dict:
 def _jsave(path: str, data):
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
+    mark_changed()
 
 # ── Topics ──
 def topic_path(name: str) -> str:
@@ -168,6 +204,7 @@ def load_topic(name: str) -> dict | None:
 def save_topic(data: dict):
     with open(topic_path(data["name"]), "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
+    mark_changed()
 
 def all_topics() -> list:
     out = []
@@ -619,6 +656,20 @@ async def send_fire_reaction(bot, chat_id: int, msg_id: int):
     except Exception as e:
         logger.debug(f"Reaction error: {e}")
 
+async def send_lightning_reaction(bot, chat_id: int, msg_id: int):
+    """Superadmin xabarlariga (guruhda) va kanal postlariga ⚡ reaksiya.
+    Eslatma: reaksiya ishlashi uchun chat sozlamalarida 'Reactions'
+    yoqilgan va bot tegishli huquqqa ega bo'lishi kerak."""
+    try:
+        await bot.set_message_reaction(
+            chat_id=chat_id,
+            message_id=msg_id,
+            reaction=[ReactionTypeEmoji(emoji="⚡")],
+            is_big=False,
+        )
+    except Exception as e:
+        logger.debug(f"Lightning reaction error: {e}")
+
 # ══════════════════════════════════════════════════════
 #  SUPERGROUP FORUM TOPICS
 # ══════════════════════════════════════════════════════
@@ -768,10 +819,16 @@ async def do_export(bot, to_backup_topic: bool = True) -> bool:
             message_thread_id=tid,
         )
         # message_id ni config'ga saqlaymiz — restore uchun
-        cfg = load_config()
-        cfg["last_backup_msg_id"]      = sent.message_id
-        cfg["last_backup_thread_id"]   = tid
-        save_config(cfg)
+        # (bu yozuv o'zi yana export'ni chaqirib yubormasligi uchun hook vaqtincha o'chiriladi)
+        global _suppress_export_hook
+        _suppress_export_hook = True
+        try:
+            cfg = load_config()
+            cfg["last_backup_msg_id"]      = sent.message_id
+            cfg["last_backup_thread_id"]   = tid
+            save_config(cfg)
+        finally:
+            _suppress_export_hook = False
         # Supergroup'da pin qilamiz
         try:
             await bot.pin_chat_message(
@@ -784,24 +841,25 @@ async def do_export(bot, to_backup_topic: bool = True) -> bool:
         logger.error(f"Export error: {e}")
         return False
 
-async def auto_export(bot):
-    """Har o'zgarishda chaqiriladi."""
-    await do_export(bot, to_backup_topic=True)
-
 async def daily_export_job(context: ContextTypes.DEFAULT_TYPE):
     logger.info("Daily export...")
     await do_export(context.bot, to_backup_topic=True)
 
 async def apply_restore_data(data: dict) -> tuple[int, int, int, int]:
-    ac = cc = tc = uc = 0
-    if "admins"   in data: save_admins(data["admins"]);     ac = len(data["admins"])
-    if "chats"    in data: save_chats(data["chats"]);       cc = len(data["chats"])
-    if "config"   in data: save_config(data["config"])
-    if "badwords" in data: save_badwords(data["badwords"])
-    if "users"    in data: save_users(data["users"]);       uc = len(data["users"])
-    for t in data.get("topics", []):
-        if "name" in t: save_topic(t); tc += 1
-    return ac, cc, tc, uc
+    global _RESTORING
+    _RESTORING = True
+    try:
+        ac = cc = tc = uc = 0
+        if "admins"   in data: save_admins(data["admins"]);     ac = len(data["admins"])
+        if "chats"    in data: save_chats(data["chats"]);       cc = len(data["chats"])
+        if "config"   in data: save_config(data["config"])
+        if "badwords" in data: save_badwords(data["badwords"])
+        if "users"    in data: save_users(data["users"]);       uc = len(data["users"])
+        for t in data.get("topics", []):
+            if "name" in t: save_topic(t); tc += 1
+        return ac, cc, tc, uc
+    finally:
+        _RESTORING = False
 
 async def _process_restore(update: Update, context: ContextTypes.DEFAULT_TYPE):
     doc = update.message.document
@@ -828,7 +886,9 @@ async def _process_restore(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown")
 
 async def auto_restore_on_startup(bot) -> None:
-    """Restart'da config.json'dagi last_backup_msg_id orqali restore qiladi."""
+    """Bot ishga tushganda (deploy/redeploy yoki restart — xotira tozalanganda)
+    config.json'dagi last_backup_msg_id orqali eng so'nggi backup'dan
+    avtomatik tiklaydi."""
     cfg    = load_config()
     msg_id = cfg.get("last_backup_msg_id")
     if not msg_id:
@@ -837,51 +897,38 @@ async def auto_restore_on_startup(bot) -> None:
     if not SUPERGROUP_ID:
         logger.warning("Auto-restore: SUPERGROUP_ID yo'q!")
         return
+
+    fwd = None
     try:
-        tgf_msg = await bot.forward_message(
+        # Backup xabarini o'ziga forward qilib, document'ini olamiz
+        fwd = await bot.forward_message(
             chat_id=SUPERGROUP_ID,
             from_chat_id=SUPERGROUP_ID,
             message_id=msg_id,
             disable_notification=True,
         )
-        doc = tgf_msg.document if tgf_msg else None
+        doc = fwd.document if fwd else None
         if not doc:
-            # forward ishlamasa to'g'ridan get_file
-            raise Exception("forward qaytarmadi document")
-    except Exception:
-        # To'g'ridan file o'qish
-        try:
-            tgf = await bot.get_file(
-                (await bot.get_messages(SUPERGROUP_ID, msg_id)).document.file_id
-            )
-        except Exception as e:
-            logger.warning(f"Auto-restore: xabarni o'qib bo'lmadi: {e}")
-            # Fallback: copy_message orqali
-            try:
-                import tempfile, os as _os
-                fw = await bot.copy_message(
-                    chat_id=SUPERGROUP_ID,
-                    from_chat_id=SUPERGROUP_ID,
-                    message_id=msg_id,
-                )
-                logger.info(f"Auto-restore: copy msg={fw.message_id}")
-            except Exception as e2:
-                logger.warning(f"Auto-restore: to'liq muvaffaqiyatsiz: {e2}")
-            return
-    # Document orqali o'qish
-    try:
-        doc2 = doc if hasattr(doc, "file_id") else tgf_msg.document
-        tgf2 = await bot.get_file(doc2.file_id)
-        raw  = await tgf2.download_as_bytearray()
+            raise ValueError("Forward qilingan xabarda document topilmadi")
+        tgf  = await bot.get_file(doc.file_id)
+        raw  = await tgf.download_as_bytearray()
         data = json.loads(raw.decode("utf-8"))
     except Exception as e:
-        logger.warning(f"Auto-restore: faylni o'qib bo'lmadi: {e}")
+        logger.warning(f"Auto-restore: backup faylini o'qib bo'lmadi: {e}")
         return
+    finally:
+        # Forward orqali yaratilgan vaqtinchalik nusxani tozalaymiz
+        if fwd is not None:
+            try:
+                await bot.delete_message(SUPERGROUP_ID, fwd.message_id)
+            except Exception:
+                pass
+
     if not data.get("export_version"):
-        logger.warning("Auto-restore: noto'g'ri format.")
+        logger.warning("Auto-restore: noto'g'ri format — export_version yo'q.")
         return
     ac, cc, tc, uc = await apply_restore_data(data)
-    logger.info(f"Auto-restore OK: {ac} admin, {cc} chat, {tc} topic, {uc} user")
+    logger.info(f"✅ Auto-restore OK: {ac} admin, {cc} chat, {tc} topic, {uc} user")
 
 # ══════════════════════════════════════════════════════
 #  BROADCAST
@@ -1003,8 +1050,6 @@ async def _save_q(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"✅ *Savol saqlandi!* {icon}\n📊 {t['emoji']} {tn}: {cnt}/{mq}",
         parse_mode="Markdown", reply_markup=kb)
-    # Auto backup
-    asyncio.create_task(auto_export(context.bot))
 
 # ══════════════════════════════════════════════════════
 #  GAME
@@ -1155,7 +1200,6 @@ async def _finalize_addadmin(q, context: ContextTypes.DEFAULT_TYPE,
         f"❓ Savol limiti: {mq} ta/topic{dn_str}{ca_str}\n\n"
         f"Jami adminlar: {len(adm)} ta",
         parse_mode="Markdown")
-    asyncio.create_task(auto_export(context.application.bot))
 
 # ══════════════════════════════════════════════════════
 #  RELAY
@@ -1570,7 +1614,6 @@ async def cmd_successful_payment(update: Update, context: ContextTypes.DEFAULT_T
 
     # Tarif topic'ini yangilash
     asyncio.create_task(update_tarif_topic_json(context.bot, tarif))
-    asyncio.create_task(auto_export(context.bot))
 
 # ══════════════════════════════════════════════════════
 #  /contact
@@ -2014,7 +2057,6 @@ async def _process_bulkq(update: Update, context: ContextTypes.DEFAULT_TYPE, raw
     await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=kb)
     if cnt >= mq:
         context.user_data.clear()
-    asyncio.create_task(auto_export(context.bot))
 
 async def cmd_listtopics(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
@@ -2823,7 +2865,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "🔐 *Topicdan kimlar foydalana oladi?*",
             parse_mode="Markdown",
             reply_markup=_access_kb(name))
-        asyncio.create_task(auto_export(context.bot))
         return
 
     if step == "addq_question" and text:
@@ -3035,8 +3076,20 @@ async def group_tracker(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if tarif in (TARIF_PLUS, TARIF_PREMIUM, TARIF_VIP):
             asyncio.create_task(send_fire_reaction(context.bot, chat.id, msg.message_id))
 
+        # ⚡ Reaksiya — superadmin xabarlariga
+        if u.id == SUPERADMIN:
+            asyncio.create_task(send_lightning_reaction(context.bot, chat.id, msg.message_id))
+
     if msg.text:
         await check_profanity(update, context)
+
+async def channel_post_tracker(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Bot kanalga qo'shilgach, kanaldagi har bir postga ⚡ reaksiya bosadi."""
+    post = update.channel_post or update.edited_channel_post
+    if not post:
+        return
+    asyncio.create_task(
+        send_lightning_reaction(context.bot, post.chat.id, post.message_id))
 
 # ══════════════════════════════════════════════════════
 #  CALLBACK HANDLER
@@ -3637,11 +3690,11 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         p    = topic_path(name)
         if os.path.exists(p):
             os.remove(p)
+            mark_changed()
         for g in games.values():
             if g.get("topic") == name:
                 g["active"] = False
         await q.edit_message_text(f"🗑 *{name}* o'chirildi.", parse_mode="Markdown")
-        asyncio.create_task(auto_export(context.bot))
         return
 
     if data == "deltopic_no":
@@ -3772,6 +3825,9 @@ async def run_bot():
 
     app = Application.builder().token(BOT_TOKEN).build()
 
+    global _BOT_REF
+    _BOT_REF = app.bot
+
     cmds = [
         ("start",           cmd_start),
         ("contact",         cmd_contact),
@@ -3851,6 +3907,12 @@ async def run_bot():
         filters.TEXT & ~filters.COMMAND,
         handle_text,
     ), group=1)
+
+    # Kanal postlari — ⚡ avtomatik reaksiya
+    app.add_handler(MessageHandler(
+        filters.UpdateType.CHANNEL_POST | filters.UpdateType.EDITED_CHANNEL_POST,
+        channel_post_tracker,
+    ))
 
     # Chat member
     app.add_handler(ChatMemberHandler(
