@@ -2825,11 +2825,14 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(msg, parse_mode="Markdown")
         return
 
-    if step in ("newtopic_access_custom", "access_custom_input") and is_admin_or_superadmin(uid):
+    if step in ("newtopic_access_custom", "access_custom_input"):
         tn = context.user_data.get("topic_name")
         t  = load_topic(tn)
         if not t:
             context.user_data.clear()
+            return
+        if not can_edit_topic_access(t, uid):
+            context.user_data.pop("step", None)
             return
         allowed = parse_allowed(text)
         t["access"] = {"type": "custom", "allowed": allowed}
@@ -2841,11 +2844,18 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown")
         return
 
-    if not is_admin_or_superadmin(uid):
-        return
-
-    if step == "bulkq_waiting":
-        await _process_bulkq(update, context)
+    if step == "newtopic_name_prompt" and is_admin_or_superadmin(uid):
+        name = text.lower().strip()
+        if not name.replace("_", "").isalnum():
+            await update.message.reply_text("❌ Nom: harf, raqam, _ bo'lsin.")
+            return
+        if topic_exists(name):
+            await update.message.reply_text(f"❌ `{name}` allaqachon bor!", parse_mode="Markdown")
+            return
+        context.user_data.update({"step": "newtopic_emoji", "topic_name": name})
+        await update.message.reply_text(
+            f"✅ Topic nomi: *{name}*\n\n🎨 Emojiini yuboring _(masalan: 🇬🇧 🔢 🧠)_",
+            parse_mode="Markdown")
         return
 
     if step == "newtopic_emoji":
@@ -2865,6 +2875,13 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "🔐 *Topicdan kimlar foydalana oladi?*",
             parse_mode="Markdown",
             reply_markup=_access_kb(name))
+        return
+
+    if not is_admin_or_superadmin(uid):
+        return
+
+    if step == "bulkq_waiting":
+        await _process_bulkq(update, context)
         return
 
     if step == "addq_question" and text:
@@ -3111,8 +3128,15 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         tarif = data.split(":")[1]
         if tarif not in (TARIF_PLUS, TARIF_PREMIUM, TARIF_VIP):
             return
+        try:
+            await _send_invoice(context.bot, q.message.chat.id, tarif, uid)
+        except Exception as e:
+            logger.error(f"send_invoice xato: {e}")
+            await q.message.reply_text(
+                "❌ To'lov hisobini yaratishda xatolik yuz berdi.\n"
+                "Iltimos, birozdan so'ng qayta urinib ko'ring yoki adminga murojaat qiling.")
+            return
         await q.message.delete()
-        await _send_invoice(context.bot, q.message.chat.id, tarif, uid)
         return
 
     # ── Superadmin menyu ──
@@ -3148,6 +3172,41 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"📋 *Topiclar ({len(topics)} ta):*\n\n" + "\n".join(lines),
                 parse_mode="Markdown",
                 reply_markup=InlineKeyboardMarkup(btns))
+            return
+
+        if section == "newtopic_prompt":
+            context.user_data.clear()
+            context.user_data["step"] = "newtopic_name_prompt"
+            await q.edit_message_text(
+                "➕ *Yangi topic*\n\nTopic nomini yuboring _(faqat harf/raqam/_, masalan: `english`)_",
+                parse_mode="Markdown")
+            return
+
+        if section == "addadmin_prompt":
+            if not is_superadmin(uid):
+                return
+            context.user_data.clear()
+            context.user_data.update({"step": "addadmin_uid", "aa_by": uid,
+                                       "aa_max_tl": MAX_TOPICS, "aa_max_mq": MAX_QUESTIONS})
+            await q.edit_message_text(
+                "➕ *Admin qo'shish*\n\nUser ID kiriting:",
+                parse_mode="Markdown")
+            return
+
+        if section == "badwords":
+            if not is_superadmin(uid):
+                return
+            bw = load_badwords()
+            words   = bw.get("words", [])
+            severe  = bw.get("severe_words", [])
+            await q.edit_message_text(
+                f"🔤 *So'z filtri*\n\n"
+                f"Oddiy: {len(words)} ta\nQo'pol: {len(severe)} ta\n\n"
+                "Qo'shish: `/addbadword so'z`\n"
+                "Qo'pol qo'shish: `/addsevereword so'z`\n"
+                "Ro'yxat: `/listbadwords`",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([[IKB("⬅️ Orqaga", callback_data="menu:back")]]))
             return
 
         if section == "admins":
@@ -3427,7 +3486,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # ── Topic access ──
     if data.startswith("acc:"):
-        if not is_admin_or_superadmin(uid): return
         _, at, tn = data.split(":", 2)
         t = load_topic(tn)
         if not t: await q.edit_message_text("❌ Topic topilmadi."); return

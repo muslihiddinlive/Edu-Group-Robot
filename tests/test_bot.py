@@ -1,0 +1,355 @@
+"""
+Tests for bot.py (single-file test suite: fixtures + tests together).
+
+Section 0 — fixtures & fake Telegram object factories.
+Section 1 — pure logic (tarif/limit/permission helpers, persistence).
+Section 2 — regressions for the 4 bugs found & fixed on 2026-07-04:
+    1. Regular (non-admin) users could not finish the /newtopic flow because
+       the "newtopic_emoji" step handler lived after an admin-only gate.
+    2. Regular users could not set access on a topic they own ("acc:" and
+       "access_custom_input" were gated to admins only).
+    3. Three superadmin-panel buttons (menu:newtopic_prompt,
+       menu:addadmin_prompt, menu:badwords) had no matching handler at all
+       and silently did nothing.
+    4. Clicking "Tarif sotib olish" deleted the message *before* trying to
+       send the Stars invoice, so a failed invoice left the user with no
+       message and no feedback at all.
+
+Run with:  pytest test_bot.py -v
+Requires:  pip install -r requirements-dev.txt --break-system-packages
+"""
+import importlib
+import sys
+from unittest.mock import AsyncMock
+
+import pytest
+
+SUPERADMIN_ID = 999999
+
+
+# ══════════════════════════════════════════════════════
+# Section 0 — fixtures & fake Telegram object factories
+# ══════════════════════════════════════════════════════
+
+@pytest.fixture
+def bot(tmp_path, monkeypatch):
+    """Import a fresh copy of bot.py isolated in tmp_path."""
+    monkeypatch.setenv("BOT_TOKEN", "TEST:TOKEN")
+    monkeypatch.setenv("SUPERADMIN_ID", str(SUPERADMIN_ID))
+    monkeypatch.chdir(tmp_path)
+
+    sys.modules.pop("bot", None)
+    module = importlib.import_module("bot")
+
+    # Never schedule real background export/backup work during tests.
+    monkeypatch.setattr(module, "mark_changed", lambda: None)
+
+    yield module
+
+    sys.modules.pop("bot", None)
+
+
+class FakeUser:
+    def __init__(self, uid, username=None, first_name="Test"):
+        self.id = uid
+        self.username = username
+        self.first_name = first_name
+        self.last_name = ""
+        self.language_code = "uz"
+
+
+class FakeChat:
+    def __init__(self, chat_id=1, chat_type="private"):
+        self.id = chat_id
+        self.type = chat_type
+
+
+class FakeMessage:
+    def __init__(self, text=None, chat=None):
+        self.text = text
+        self.chat = chat or FakeChat()
+        self.message_id = 1
+        self.deleted = False
+        self.replies = []
+
+    async def reply_text(self, text, **kwargs):
+        self.replies.append(text)
+        return FakeMessage(text=text, chat=self.chat)
+
+    async def delete(self):
+        self.deleted = True
+
+
+class FakeUpdate:
+    """Mimics telegram.Update for handle_text-style handlers."""
+    def __init__(self, uid, text, chat_type="private", username=None):
+        self.effective_user = FakeUser(uid, username=username)
+        self.effective_chat = FakeChat(chat_type=chat_type)
+        self.message = FakeMessage(text=text, chat=self.effective_chat)
+
+
+class FakeCallbackQuery:
+    def __init__(self, uid, data, username=None, chat_id=1):
+        self.from_user = FakeUser(uid, username=username)
+        self.data = data
+        self.message = FakeMessage(chat=FakeChat(chat_id=chat_id))
+        self.answered = False
+        self.edits = []
+
+    async def answer(self, *a, **kw):
+        self.answered = True
+
+    async def edit_message_text(self, text, **kwargs):
+        self.edits.append(text)
+
+
+class FakeCallbackUpdate:
+    def __init__(self, uid, data, username=None):
+        self.callback_query = FakeCallbackQuery(uid, data, username=username)
+
+
+class FakeContext:
+    def __init__(self, bot=None):
+        self.user_data = {}
+        self.bot = bot
+
+
+@pytest.fixture
+def make_text_update():
+    return FakeUpdate
+
+
+@pytest.fixture
+def make_callback_update():
+    return FakeCallbackUpdate
+
+
+@pytest.fixture
+def make_context():
+    return FakeContext
+
+
+# ══════════════════════════════════════════════════════
+# Section 1 — pure logic
+# ══════════════════════════════════════════════════════
+
+def test_free_user_default_topic_limit(bot):
+    bot.save_user(111, {"tarif": bot.TARIF_FREE, "referral_count": 0})
+    assert bot.get_user_topic_limit(111) == 1
+
+
+def test_free_user_referral_bonus_caps_at_max(bot):
+    bot.save_user(111, {"tarif": bot.TARIF_FREE, "referral_count": 999})
+    assert bot.get_user_topic_limit(111) == bot.FREE_MAX_TOPIC_REFERRAL
+
+
+def test_plus_user_topic_limit_from_tarif_table(bot):
+    bot.save_user(111, {"tarif": bot.TARIF_PLUS, "referral_count": 0})
+    assert bot.get_user_topic_limit(111) == bot.TARIF_TOPIC_LIMIT[bot.TARIF_PLUS]
+
+
+def test_superadmin_has_unlimited_topics(bot):
+    assert bot.get_user_topic_limit(bot.SUPERADMIN) == 9999
+
+
+def test_expired_tarif_reverts_to_free(bot):
+    bot.save_user(111, {
+        "tarif": bot.TARIF_VIP,
+        "tarif_expires": "2000-01-01T00:00:00+05:00",
+        "referral_count": 0,
+    })
+    assert bot.get_user_tarif(111) == bot.TARIF_FREE
+    # and it should have been persisted back to disk
+    assert bot.get_user(111)["tarif"] == bot.TARIF_FREE
+
+
+def test_admin_topic_limit_overrides_tarif(bot):
+    bot.save_admins({"222": {"topic_limit": 7, "max_questions": 500}})
+    assert bot.get_user_topic_limit(222) == 7
+
+
+def test_parse_allowed_mixed_ids_and_usernames(bot):
+    result = bot.parse_allowed("123456, @AkaJon  789")
+    assert result == [123456, "@akajon", 789]
+
+
+def test_parse_allowed_ignores_garbage(bot):
+    assert bot.parse_allowed("not_a_number ,,, ") == []
+
+
+def test_topic_save_and_load_roundtrip(bot):
+    bot.save_topic({"name": "english", "emoji": "🇬🇧", "created_by": 5,
+                     "access": {"type": "all", "allowed": []}, "questions": []})
+    assert bot.topic_exists("english")
+    loaded = bot.load_topic("english")
+    assert loaded["emoji"] == "🇬🇧"
+    assert loaded["created_by"] == 5
+
+
+def test_can_manage_topic_owner_only_access(bot):
+    topic = {"created_by": 5, "access": {"type": "owner"}}
+    assert bot.can_manage_topic(topic, 5) is True
+    assert bot.can_manage_topic(topic, 6) is False
+
+
+def test_can_edit_topic_access_owner_and_superadmin(bot):
+    topic = {"created_by": 5}
+    assert bot.can_edit_topic_access(topic, 5) is True
+    assert bot.can_edit_topic_access(topic, bot.SUPERADMIN) is True
+    assert bot.can_edit_topic_access(topic, 42) is False
+
+
+def test_is_admin_or_superadmin(bot):
+    bot.save_admins({"321": {"topic_limit": 1, "max_questions": 10}})
+    assert bot.is_admin_or_superadmin(321) is True
+    assert bot.is_admin_or_superadmin(bot.SUPERADMIN) is True
+    assert bot.is_admin_or_superadmin(4444) is False
+
+
+# ══════════════════════════════════════════════════════
+# Section 2 — regression tests for the fixed bugs
+# ══════════════════════════════════════════════════════
+
+REGULAR_USER = 555555   # not an admin, not the superadmin
+
+
+@pytest.mark.asyncio
+async def test_regular_user_can_complete_newtopic_flow(bot, make_text_update, make_context):
+    """Bug #1: a plain Free-tarif user must be able to create a topic
+    end-to-end via /newtopic -> name -> emoji, without being an admin."""
+    ctx = make_context()
+    ctx.user_data.update({"step": "newtopic_emoji", "topic_name": "math"})
+    update = make_text_update(REGULAR_USER, "🔢")
+
+    await bot.handle_text(update, ctx)
+
+    assert bot.topic_exists("math")
+    topic = bot.load_topic("math")
+    assert topic["created_by"] == REGULAR_USER
+    assert ctx.user_data.get("step") == "newtopic_access"
+
+
+@pytest.mark.asyncio
+async def test_regular_user_can_set_access_on_own_topic(bot, make_callback_update, make_context):
+    """Bug #2: the topic owner (regular user) must be able to pick who can
+    use their own topic via the 'acc:' callback."""
+    bot.save_topic({"name": "math", "emoji": "🔢", "created_by": REGULAR_USER,
+                     "access": {"type": "all", "allowed": []}, "questions": []})
+    ctx = make_context(bot=AsyncMock())
+    update = make_callback_update(REGULAR_USER, "acc:owner:math")
+
+    await bot.callback_handler(update, ctx)
+
+    topic = bot.load_topic("math")
+    assert topic["access"]["type"] == "owner"
+
+
+@pytest.mark.asyncio
+async def test_non_owner_non_admin_cannot_set_access(bot, make_callback_update, make_context):
+    """The permission check itself (can_edit_topic_access) must still be
+    enforced — only the owner or superadmin can change access."""
+    bot.save_topic({"name": "math", "emoji": "🔢", "created_by": REGULAR_USER,
+                     "access": {"type": "all", "allowed": []}, "questions": []})
+    ctx = make_context(bot=AsyncMock())
+    intruder = 777777
+    update = make_callback_update(intruder, "acc:owner:math")
+
+    await bot.callback_handler(update, ctx)
+
+    topic = bot.load_topic("math")
+    assert topic["access"]["type"] == "all"  # unchanged
+
+
+@pytest.mark.asyncio
+async def test_regular_user_can_submit_custom_access_list(bot, make_text_update, make_context):
+    """Bug #2 (continued): the free-text 'custom access' step must also work
+    for the topic owner, not just admins."""
+    bot.save_topic({"name": "math", "emoji": "🔢", "created_by": REGULAR_USER,
+                     "access": {"type": "all", "allowed": []}, "questions": []})
+    ctx = make_context()
+    ctx.user_data.update({"step": "access_custom_input", "topic_name": "math"})
+    update = make_text_update(REGULAR_USER, "@akajon 12345")
+
+    await bot.handle_text(update, ctx)
+
+    topic = bot.load_topic("math")
+    assert topic["access"]["type"] == "custom"
+    assert topic["access"]["allowed"] == ["@akajon", 12345]
+
+
+@pytest.mark.asyncio
+async def test_menu_newtopic_prompt_button_now_works(bot, make_callback_update, make_context):
+    """Bug #3: the superadmin '➕ Yangi topic' button used to do nothing."""
+    ctx = make_context(bot=AsyncMock())
+    update = make_callback_update(bot.SUPERADMIN, "menu:newtopic_prompt")
+
+    await bot.callback_handler(update, ctx)
+
+    assert ctx.user_data.get("step") == "newtopic_name_prompt"
+    assert update.callback_query.edits, "kutilgan javob yuborilmadi"
+
+
+@pytest.mark.asyncio
+async def test_menu_addadmin_prompt_button_now_works(bot, make_callback_update, make_context):
+    """Bug #3: the superadmin '➕ Admin qo'shish' button used to do nothing."""
+    ctx = make_context(bot=AsyncMock())
+    update = make_callback_update(bot.SUPERADMIN, "menu:addadmin_prompt")
+
+    await bot.callback_handler(update, ctx)
+
+    assert ctx.user_data.get("step") == "addadmin_uid"
+    assert update.callback_query.edits
+
+
+@pytest.mark.asyncio
+async def test_menu_badwords_button_now_works(bot, make_callback_update, make_context):
+    """Bug #3: the superadmin '🔤 So'z filtri' button used to do nothing."""
+    ctx = make_context(bot=AsyncMock())
+    update = make_callback_update(bot.SUPERADMIN, "menu:badwords")
+
+    await bot.callback_handler(update, ctx)
+
+    assert update.callback_query.edits
+    assert "So'z filtri" in update.callback_query.edits[-1]
+
+
+@pytest.mark.asyncio
+async def test_newtopic_name_prompt_rejects_duplicate(bot, make_text_update, make_context):
+    bot.save_topic({"name": "math", "emoji": "🔢", "created_by": 1,
+                     "access": {"type": "all", "allowed": []}, "questions": []})
+    ctx = make_context()
+    ctx.user_data["step"] = "newtopic_name_prompt"
+    update = make_text_update(bot.SUPERADMIN, "math")
+
+    await bot.handle_text(update, ctx)
+
+    assert "allaqachon bor" in update.message.replies[-1]
+    assert ctx.user_data.get("step") == "newtopic_name_prompt"  # unchanged, stays in this step
+
+
+@pytest.mark.asyncio
+async def test_buy_tarif_invoice_success_deletes_prompt(bot, make_callback_update, make_context, monkeypatch):
+    """Bug #4 (happy path): once the invoice is actually sent, the old
+    'choose a tarif' message should be cleaned up."""
+    monkeypatch.setattr(bot, "_send_invoice", AsyncMock())
+    ctx = make_context(bot=AsyncMock())
+    update = make_callback_update(REGULAR_USER, f"buy:{bot.TARIF_PLUS}")
+
+    await bot.callback_handler(update, ctx)
+
+    assert update.callback_query.message.deleted is True
+
+
+@pytest.mark.asyncio
+async def test_buy_tarif_invoice_failure_keeps_message_and_reports_error(
+        bot, make_callback_update, make_context, monkeypatch):
+    """Bug #4: if sending the invoice fails, the user must NOT be left with
+    the message silently deleted and no feedback."""
+    monkeypatch.setattr(bot, "_send_invoice", AsyncMock(side_effect=RuntimeError("stars xato")))
+    ctx = make_context(bot=AsyncMock())
+    update = make_callback_update(REGULAR_USER, f"buy:{bot.TARIF_PLUS}")
+
+    await bot.callback_handler(update, ctx)
+
+    assert update.callback_query.message.deleted is False
+    assert update.callback_query.message.replies, "xato haqida xabar berilmadi"
