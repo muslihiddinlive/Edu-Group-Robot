@@ -1618,7 +1618,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data.clear()
             context.user_data["step"] = "newtopic_name_prompt"
             await q.edit_message_text(
-                "➕ *Yangi topic*\n\nTopic nomini yuboring _(faqat harf/raqam/_, masalan: `english`)_",
+                "➕ *Yangi topic*\n\nTopic nomini yuboring _(faqat harf, raqam yoki pastki chiziq, masalan: `english`)_",
                 parse_mode="Markdown")
             return
 
