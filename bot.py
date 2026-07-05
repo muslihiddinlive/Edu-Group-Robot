@@ -184,7 +184,7 @@ async def cmd_setdisplayname(update: Update, context: ContextTypes.DEFAULT_TYPE)
         name = None
     if target.lower() == "me":
         set_display_name(SUPERADMIN, name)
-        msg = f"✅ O'z nomingiz: *{name}*" if name else "✅ Nomingiz o'chirildi."
+        msg = f"✅ O'z nomingiz: *{mdesc(name)}*" if name else "✅ Nomingiz o'chirildi."
     else:
         try:
             uid_t = int(target)
@@ -196,7 +196,7 @@ async def cmd_setdisplayname(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await update.message.reply_text(f"❌ `{uid_t}` admin emas.", parse_mode="Markdown")
             return
         set_display_name(uid_t, name)
-        msg = (f"✅ `{uid_t}` uchun nom: *{name}*" if name
+        msg = (f"✅ `{uid_t}` uchun nom: *{mdesc(name)}*" if name
                else f"✅ `{uid_t}` nomi o'chirildi.")
     await update.message.reply_text(msg, parse_mode="Markdown")
 
@@ -244,7 +244,7 @@ async def cmd_newtopic(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     context.user_data.update({"step": "newtopic_emoji", "topic_name": name})
     await update.message.reply_text(
-        f"✅ Topic nomi: *{name}*\n\n🎨 Emojiini yuboring _(masalan: 🇬🇧 🔢 🧠)_",
+        f"✅ Topic nomi: *{mdesc(name)}*\n\n🎨 Emojiini yuboring _(masalan: 🇬🇧 🔢 🧠)_",
         parse_mode="Markdown")
 
 async def cmd_edittopicaccess(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -278,7 +278,7 @@ async def cmd_edittopicaccess(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
     cur = ACCESS_LABELS.get(t.get("access", {}).get("type", "all"), "—")
     await update.message.reply_text(
-        f"🔐 *{name}* — hozirgi: {cur}\n\nYangi access:",
+        f"🔐 *{mdesc(name)}* — hozirgi: {cur}\n\nYangi access:",
         parse_mode="Markdown", reply_markup=_access_kb(name))
 
 async def cmd_addq(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -383,7 +383,7 @@ async def cmd_bulkq(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     rem = mq - len(t["questions"])
     await update.message.reply_text(
-        f"📥 *{t['emoji']} {name}* — ommaviy\n\n"
+        f"📥 *{t['emoji']} {mdesc(name)}* — ommaviy\n\n"
         f"📊 {len(t['questions'])}/{mq} | yana {rem} ta\n\n"
         "*Format:*\n`apple - olma`\n`orange - apelsin - sabzirang`\n\n⏹ /done",
         parse_mode="Markdown")
@@ -426,11 +426,15 @@ async def _process_bulkq(update: Update, context: ContextTypes.DEFAULT_TYPE, raw
     if errors:
         msg += "\n\n❌ *Xatolar:*\n" + "\n".join(errors[:5])
     kb = None
+    back_cb = "menu:back" if is_admin_or_superadmin(uid) else "u:back"
     if cnt < mq:
         kb = InlineKeyboardMarkup([
             [IKB("➕ Yana savollar", callback_data="bulkq_more"),
              IKB("⏹ Tugatish",      callback_data="addq_finish")],
+            [IKB("🏠 Bosh menyu", callback_data=back_cb)],
         ])
+    else:
+        kb = InlineKeyboardMarkup([[IKB("🏠 Bosh menyu", callback_data=back_cb)]])
     await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=kb)
     if cnt >= mq:
         context.user_data.clear()
@@ -477,7 +481,7 @@ async def cmd_deletetopic(update: Update, context: ContextTypes.DEFAULT_TYPE):
         IKB("❌ Bekor",      callback_data="deltopic_no"),
     ]])
     await update.message.reply_text(
-        f"⚠️ *{name}* o'chirilsinmi? Barcha savollar ham o'chadi!",
+        f"⚠️ *{mdesc(name)}* o'chirilsinmi? Barcha savollar ham o'chadi!",
         parse_mode="Markdown", reply_markup=kb)
 
 async def cmd_setprize(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -504,7 +508,7 @@ async def cmd_setprize(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
     context.user_data.update({"step": "setprize_waiting", "topic_name": name})
     await update.message.reply_text(
-        f"🏆 *{name}* uchun sovrinni yuboring _(rasm, GIF yoki stiker)_:",
+        f"🏆 *{mdesc(name)}* uchun sovrinni yuboring _(rasm, GIF yoki stiker)_:",
         parse_mode="Markdown")
 
 async def cmd_listgames(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -837,7 +841,7 @@ async def cmd_createtopic(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tid  = await ensure_forum_topic(context.bot, name, f"custom_{name.lower().replace(' ','_')}")
     if tid:
         await update.message.reply_text(
-            f"✅ Topic yaratildi: *{name}*\nID: `{tid}`", parse_mode="Markdown")
+            f"✅ Topic yaratildi: *{mdesc(name)}*\nID: `{tid}`", parse_mode="Markdown")
     else:
         await update.message.reply_text("❌ Topic yaratib bo'lmadi.")
 
@@ -1082,7 +1086,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     message_id=update.message.message_id)
                 chats = load_chats()
                 name  = chats.get(str(target_cid), {}).get("name", str(target_cid))
-                await update.message.reply_text(f"✅ *{name}* guruhiga yuborildi!", parse_mode="Markdown")
+                await update.message.reply_text(f"✅ *{mdesc(name)}* guruhiga yuborildi!", parse_mode="Markdown")
             except Exception as e:
                 await update.message.reply_text(f"❌ Yuborib bo'lmadi:\n`{e}`", parse_mode="Markdown")
         return
@@ -1191,13 +1195,33 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=_aa_can_add_kb())
         return
 
+    if step == "admreact_custom_wait" and is_superadmin(uid):
+        target = context.user_data.pop("ar_target", None)
+        context.user_data.pop("step", None)
+        cid = text.strip()
+        if not cid.isdigit():
+            await update.message.reply_text(
+                "❌ Custom emoji ID faqat raqamlardan iborat bo'lishi kerak. Bekor qilindi.")
+            return
+        adm = load_admins()
+        if not target or str(target) not in adm:
+            await update.message.reply_text("❌ Bu admin topilmadi.")
+            return
+        adm[str(target)]["reaction_custom_emoji_id"] = cid
+        adm[str(target)].pop("reaction_emoji", None)
+        save_admins(adm)
+        await update.message.reply_text(
+            f"✅ `{target}` uchun premium/animatsion reaksiya (ID: `{cid}`) belgilandi.",
+            parse_mode="Markdown")
+        return
+
     if step == "editadmin_dname" and is_superadmin(uid):
         uid_e = context.user_data.pop("ea_uid", None)
         context.user_data.pop("step", None)
         if uid_e:
             name = None if text == "-" else text
             set_display_name(uid_e, name)
-            msg = (f"✅ `{uid_e}` uchun nom: *{name}*" if name
+            msg = (f"✅ `{uid_e}` uchun nom: *{mdesc(name)}*" if name
                    else f"✅ `{uid_e}` nomi o'chirildi.")
             await update.message.reply_text(msg, parse_mode="Markdown")
         return
@@ -1217,7 +1241,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.pop("step", None)
         s = ", ".join(str(a) for a in allowed) if allowed else "hech kim"
         await update.message.reply_text(
-            f"✅ *{tn}* access: ✏️ Qo'lda\nRuxsat berilganlar: {s}",
+            f"✅ *{mdesc(tn)}* access: ✏️ Qo'lda\nRuxsat berilganlar: {s}",
             parse_mode="Markdown")
         return
 
@@ -1239,7 +1263,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         context.user_data.update({"step": "newtopic_emoji", "topic_name": name})
         await update.message.reply_text(
-            f"✅ Topic nomi: *{name}*\n\n🎨 Emojiini yuboring _(masalan: 🇬🇧 🔢 🧠)_",
+            f"✅ Topic nomi: *{mdesc(name)}*\n\n🎨 Emojiini yuboring _(masalan: 🇬🇧 🔢 🧠)_",
             parse_mode="Markdown")
         return
 
@@ -1256,7 +1280,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         })
         context.user_data["step"] = "newtopic_access"
         await update.message.reply_text(
-            f"✅ Topic yaratildi: {text} *{name}*\n\n"
+            f"✅ Topic yaratildi: {text} *{mdesc(name)}*\n\n"
             "🔐 *Topicdan kimlar foydalana oladi?*",
             parse_mode="Markdown",
             reply_markup=_access_kb(name))
@@ -1324,7 +1348,7 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     message_id=update.message.message_id)
                 chats = load_chats()
                 name  = chats.get(str(target_cid), {}).get("name", str(target_cid))
-                await update.message.reply_text(f"✅ *{name}* guruhiga yuborildi!", parse_mode="Markdown")
+                await update.message.reply_text(f"✅ *{mdesc(name)}* guruhiga yuborildi!", parse_mode="Markdown")
             except Exception as e:
                 await update.message.reply_text(f"❌ Yuborib bo'lmadi:\n`{e}`", parse_mode="Markdown")
         return
@@ -1364,7 +1388,7 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
             t["prize"] = prize
             save_topic(t)
         context.user_data.clear()
-        await update.message.reply_text(f"✅ *{tn}* uchun sovrin saqlandi! 🏆", parse_mode="Markdown")
+        await update.message.reply_text(f"✅ *{mdesc(tn)}* uchun sovrin saqlandi! 🏆", parse_mode="Markdown")
         return
 
     if step == "addq_media_waiting":
@@ -1473,10 +1497,22 @@ async def group_tracker(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if u:
         track_msg(chat.id, msg.message_id, u.id, u.username, msg.date.timestamp())
 
-        # 🔥 Reaksiya — tarif egalariga
-        tarif = get_user_tarif(u.id)
-        if tarif in (TARIF_PLUS, TARIF_PREMIUM, TARIF_VIP):
-            asyncio.create_task(send_fire_reaction(context.bot, chat.id, msg.message_id))
+        # 🎭 Reaksiya — bot adminlariga (superadmindan tashqari) shaxsiy belgilangan reaksiya
+        if u.id != SUPERADMIN and is_bot_admin(u.id):
+            adm_data = load_admins().get(str(u.id), {})
+            custom_id = adm_data.get("reaction_custom_emoji_id")
+            named     = adm_data.get("reaction_emoji")
+            if custom_id:
+                asyncio.create_task(send_custom_reaction(context.bot, chat.id, msg.message_id, custom_id))
+            elif named:
+                asyncio.create_task(send_named_reaction(context.bot, chat.id, msg.message_id, named))
+            else:
+                asyncio.create_task(send_fire_reaction(context.bot, chat.id, msg.message_id))
+        else:
+            # 🔥 Reaksiya — tarif egalariga
+            tarif = get_user_tarif(u.id)
+            if tarif in (TARIF_PLUS, TARIF_PREMIUM, TARIF_VIP):
+                asyncio.create_task(send_fire_reaction(context.bot, chat.id, msg.message_id))
 
         # ⚡ Reaksiya — superadmin xabarlariga
         if u.id == SUPERADMIN:
@@ -1500,7 +1536,12 @@ async def channel_post_tracker(update: Update, context: ContextTypes.DEFAULT_TYP
 async def global_error_handler(update, context: ContextTypes.DEFAULT_TYPE):
     """Global xatoliklarni tutish. Bu bo'lmasa, har qanday xatolik
     (masalan 'Message is not modified') jim yutilib, tugma/buyruq
-    foydalanuvchi uchun 'ishlamayapti' bo'lib ko'rinardi."""
+    foydalanuvchi uchun 'ishlamayapti' bo'lib ko'rinardi.
+
+    Eslatma: bu funksiya endi kanalga yoki superadminga hech qanday
+    xabar YUBORMAYDI — faqat server logiga (Render → Logs) yozadi,
+    kanal postlari yoki fon vazifalaridagi kutilgan/zararsiz xatolar
+    tufayli superadminga spam ketmasligi uchun."""
     err = context.error
     err_text = str(err)
 
@@ -1510,30 +1551,13 @@ async def global_error_handler(update, context: ContextTypes.DEFAULT_TYPE):
 
     logger.error("Update xatoligi:", exc_info=err)
 
-    # Foydalanuvchiga xabar berishga urinamiz
+    # Faqat callback tugma bosilganda foydalanuvchiga qisqa, ko'rinmas
+    # (toast) ogohlantirish beramiz — bu chatga yozib spam qilmaydi va
+    # faqat o'sha tugmani bosgan kishigagina ko'rinadi.
     try:
-        if isinstance(update, Update):
-            chat = update.effective_chat
-            if update.callback_query:
-                try:
-                    await update.callback_query.answer(
-                        "⚠️ Xatolik yuz berdi, qayta urinib ko'ring.", show_alert=True)
-                except Exception:
-                    pass
-            elif chat is not None:
-                await context.bot.send_message(
-                    chat.id, "⚠️ Xatolik yuz berdi. Iltimos, /start bosib qayta urinib ko'ring.")
-    except Exception:
-        pass
-
-    # Superadminga texnik tafsilot yuboramiz (debug uchun)
-    try:
-        import traceback
-        tb = "".join(traceback.format_exception(None, err, err.__traceback__))[-3000:]
-        await context.bot.send_message(
-            SUPERADMIN,
-            f"🐞 *Bot xatoligi:*\n`{err_text[:300]}`\n\n```\n{tb}\n```",
-            parse_mode="Markdown")
+        if isinstance(update, Update) and update.callback_query:
+            await update.callback_query.answer(
+                "⚠️ Xatolik yuz berdi, qayta urinib ko'ring.", show_alert=True)
     except Exception:
         pass
 
@@ -1890,7 +1914,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["step"]        = "sendas_waiting"
         context.user_data["sendas_chat"] = int(cid_str)
         await q.edit_message_text(
-            f"📤 *{name}* guruhiga xabar yuboring:\n\n⏹ /cancel", parse_mode="Markdown")
+            f"📤 *{mdesc(name)}* guruhiga xabar yuboring:\n\n⏹ /cancel", parse_mode="Markdown")
         return
 
     # ── Require admin ──
@@ -1914,7 +1938,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             btns.append([IKB(f"{s} {v.get('name', k)}", callback_data=f"req_adm:{k}")])
         btns.append([IKB("⬅️ Orqaga", callback_data="menu:settings")])
         await q.edit_message_text(
-            f"✅ *{name}* — {status}",
+            f"✅ *{mdesc(name)}* — {status}",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(btns))
         return
@@ -1931,17 +1955,27 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not t: await q.edit_message_text("❌ Topic topilmadi."); return
         if not can_edit_topic_access(t, uid):
             await q.answer("❌ Ruxsat yo'q!", show_alert=True); return
+        is_creation_flow = context.user_data.get("step") == "newtopic_access"
         if at == "custom":
             context.user_data["topic_name"] = tn
             context.user_data["step"]       = "access_custom_input"
             await q.edit_message_text(
-                f"✏️ *{tn}* — ruxsat beriladiganlar:\n\n`@username` yoki `123456789`",
+                f"✏️ *{mdesc(tn)}* — ruxsat beriladiganlar:\n\n`@username` yoki `123456789`",
                 parse_mode="Markdown")
-        else:
-            t["access"] = {"type": at, "allowed": []}
-            save_topic(t)
+            return
+        t["access"] = {"type": at, "allowed": []}
+        save_topic(t)
+        if is_creation_flow:
+            context.user_data.clear()
+            after_kb = (_after_action_kb(tn) if is_admin_or_superadmin(uid)
+                        else _after_action_kb_user(tn))
             await q.edit_message_text(
-                f"✅ *{tn}* — Access: {ACCESS_LABELS.get(at, at)}",
+                f"✅ *{mdesc(tn)}* topic tayyor!\n🔐 Access: {ACCESS_LABELS.get(at, at)}\n\n"
+                "Endi savollar qo'shishingiz mumkin 👇",
+                parse_mode="Markdown", reply_markup=after_kb)
+        else:
+            await q.edit_message_text(
+                f"✅ *{mdesc(tn)}* — Access: {ACCESS_LABELS.get(at, at)}",
                 parse_mode="Markdown")
         return
 
@@ -1954,7 +1988,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.answer("❌ Faqat topic egasi!", show_alert=True); return
         cur = ACCESS_LABELS.get(t.get("access", {}).get("type", "all"), "—")
         await q.edit_message_text(
-            f"🔐 *{tn}* — hozir: {cur}\n\nYangi access:",
+            f"🔐 *{mdesc(tn)}* — hozir: {cur}\n\nYangi access:",
             parse_mode="Markdown", reply_markup=_access_kb(tn))
         return
 
@@ -1992,6 +2026,60 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["ea_uid"] = uid_e
         await q.edit_message_text(
             f"🏷 `{uid_e}` uchun yangi nom:\n_(o'chirish: `-`)_",
+            parse_mode="Markdown")
+        return
+
+    # ── Admin uchun reaksiya tanlash ──
+    if data.startswith("admreact_page:"):
+        if not is_superadmin(uid): return
+        _, target_s, page_s = data.split(":")
+        target = int(target_s)
+        await q.edit_message_text(
+            "🎭 *Bu adminning guruhdagi xabarlariga qanday reaksiya bosay?*",
+            parse_mode="Markdown",
+            reply_markup=_reaction_pick_kb(target, int(page_s)))
+        return
+
+    if data.startswith("admreact_custom:"):
+        if not is_superadmin(uid): return
+        target = int(data.split(":")[1])
+        context.user_data.clear()
+        context.user_data.update({"step": "admreact_custom_wait", "ar_target": target})
+        await q.edit_message_text(
+            "🆔 *Custom emoji ID yuboring*\n\n"
+            "_(Premium/animatsion reaksiya uchun. ID'ni topish uchun "
+            "istalgan premium emojini guruhda ishlatib, botga "
+            "@userinfobot yoki shunga o'xshash vositalar orqali "
+            "custom_emoji_id'ni aniqlashingiz mumkin)_",
+            parse_mode="Markdown")
+        return
+
+    if data.startswith("admreact_skip:"):
+        if not is_superadmin(uid): return
+        target = int(data.split(":")[1])
+        adm = load_admins()
+        if str(target) in adm:
+            adm[str(target)].pop("reaction_emoji", None)
+            adm[str(target)].pop("reaction_custom_emoji_id", None)
+            save_admins(adm)
+        await q.edit_message_text(
+            f"✅ `{target}` uchun standart reaksiya (🔥) qo'llaniladi.",
+            parse_mode="Markdown")
+        return
+
+    if data.startswith("admreact:"):
+        if not is_superadmin(uid): return
+        _, target_s, emoji = data.split(":", 2)
+        target = int(target_s)
+        adm = load_admins()
+        if str(target) not in adm:
+            await q.edit_message_text("❌ Bu admin topilmadi.")
+            return
+        adm[str(target)]["reaction_emoji"] = emoji
+        adm[str(target)].pop("reaction_custom_emoji_id", None)
+        save_admins(adm)
+        await q.edit_message_text(
+            f"✅ `{target}` uchun reaksiya belgilandi: {emoji}",
             parse_mode="Markdown")
         return
 
@@ -2125,6 +2213,30 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # ── addq ──
+    if data.startswith("bulkq_topic:"):
+        name = data.split(":", 1)[1]
+        t    = load_topic(name)
+        if not t: return
+        if not can_manage_topic(t, uid, q.from_user.username) and t.get("created_by") != uid:
+            await q.answer("❌ Ruxsat yo'q!", show_alert=True); return
+        mq  = get_admin_max_questions(uid) if is_admin_or_superadmin(uid) else get_user_q_limit(uid)
+        rem = mq - len(t["questions"])
+        if rem <= 0:
+            await q.edit_message_text(f"❌ Limit: {mq} ta savol!"); return
+        context.user_data.clear()
+        context.user_data.update({"step": "bulkq_waiting", "topic_name": name})
+        await q.edit_message_text(
+            f"📥 *{t['emoji']} {mdesc(name)}* — ommaviy qo'shish\n\n"
+            f"📊 {len(t['questions'])}/{mq} | yana {rem} ta\n\n"
+            "Har bir savolni yangi qatorga yozing, `-` bilan ajrating:\n\n"
+            "`savol - javob - sinonim1 - sinonim2`\n\n"
+            "*Masalan:*\n"
+            "`apple - olma`\n"
+            "`orange - apelsin - olovrang - sabzirang`\n\n"
+            "⏹ /done bilan tugatasiz",
+            parse_mode="Markdown")
+        return
+
     if data.startswith("addq_topic:"):
         name = data.split(":", 1)[1]
         t    = load_topic(name)
@@ -2177,22 +2289,35 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "addq_finish":
         tn = context.user_data.get("topic_name", "?")
         context.user_data.clear()
-        await q.edit_message_text(f"✅ *Tugatildi!*\n`/listtopics` bilan ko'ring.",
-                                  parse_mode="Markdown")
+        back_cb = "menu:back" if is_admin_or_superadmin(uid) else "u:back"
+        await q.edit_message_text(
+            f"✅ *Tugatildi!*",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[IKB("🏠 Bosh menyu", callback_data=back_cb)]]))
         return
 
     # ── deltopic ──
     if data.startswith("deltopic:"):
-        if not is_superadmin(uid): return
-        name = data.split(":", 1)[1]
-        p    = topic_path(name)
+        parts  = data.split(":")
+        name   = parts[1]
+        origin = parts[2] if len(parts) > 2 else None
+        t      = load_topic(name)
+        is_owner = bool(t) and t.get("created_by") == uid
+        if not (is_superadmin(uid) or is_owner):
+            await q.answer("❌ Ruxsat yo'q!", show_alert=True); return
+        p = topic_path(name)
         if os.path.exists(p):
             os.remove(p)
             mark_changed()
         for g in games.values():
             if g.get("topic") == name:
                 g["active"] = False
-        await q.edit_message_text(f"🗑 *{name}* o'chirildi.", parse_mode="Markdown")
+        back_kb = None
+        if origin:
+            back_cb = "menu:topics" if origin == "menu" else "u:topics"
+            back_kb = InlineKeyboardMarkup([[IKB("⬅️ Orqaga", callback_data=back_cb)]])
+        await q.edit_message_text(f"🗑 *{mdesc(name)}* o'chirildi.", parse_mode="Markdown",
+                                  reply_markup=back_kb)
         return
 
     if data == "deltopic_no":
@@ -2206,7 +2331,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data.clear()
         context.user_data.update({"step": "setprize_waiting", "topic_name": name})
         await q.edit_message_text(
-            f"🏆 *{name}* uchun sovrinni yuboring _(rasm, GIF yoki stiker)_:",
+            f"🏆 *{mdesc(name)}* uchun sovrinni yuboring _(rasm, GIF yoki stiker)_:",
             parse_mode="Markdown")
         return
 
@@ -2274,21 +2399,33 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data.startswith("topic_detail:"):
-        name = data.split(":", 1)[1]
-        t    = load_topic(name)
+        parts  = data.split(":")
+        name   = parts[1]
+        origin = parts[2] if len(parts) > 2 else "menu"
+        t      = load_topic(name)
         if not t:
             await q.edit_message_text("❌ Topic topilmadi.")
             return
-        mq  = get_admin_max_questions(uid)
+        is_owner = t.get("created_by") == uid
+        if not (is_superadmin(uid) or is_bot_admin(uid) or is_owner):
+            await q.answer("❌ Ruxsat yo'q!", show_alert=True); return
+        mq  = get_admin_max_questions(uid) if is_admin_or_superadmin(uid) else get_user_q_limit(uid)
         acc = ACCESS_LABELS.get(t.get("access", {}).get("type", "all"), "—")
-        kb  = InlineKeyboardMarkup([
-            [IKB("📝 Savol qo'sh",    callback_data=f"addq_topic:{name}"),
-             IKB("🔐 Access",         callback_data=f"eta:{name}")],
-            [IKB("🗑 O'chirish",      callback_data=f"deltopic:{name}"),
-             IKB("⬅️ Orqaga",         callback_data="menu:topics")],
-        ])
+        back_cb = "menu:topics" if origin == "menu" else "u:topics"
+        rows = [
+            [IKB("📝 Bitta-bitta",    callback_data=f"addq_topic:{name}"),
+             IKB("📥 Ommaviy",         callback_data=f"bulkq_topic:{name}")],
+        ]
+        if is_superadmin(uid) or is_owner:
+            rows.append([IKB("🔐 Access", callback_data=f"eta:{name}")])
+        del_row = []
+        if is_superadmin(uid) or is_owner:
+            del_row.append(IKB("🗑 O'chirish", callback_data=f"deltopic:{name}:{origin}"))
+        del_row.append(IKB("⬅️ Orqaga", callback_data=back_cb))
+        rows.append(del_row)
+        kb = InlineKeyboardMarkup(rows)
         await q.edit_message_text(
-            f"{t['emoji']} *{name}*\n\n"
+            f"{t['emoji']} *{mdesc(name)}*\n\n"
             f"❓ Savollar: {len(t['questions'])}/{mq}\n"
             f"🔐 Access: {acc}\n"
             f"👤 Yaratgan: `{t.get('created_by', '?')}`",

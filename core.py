@@ -35,6 +35,7 @@ from telegram import (
     ReplyKeyboardRemove,
     LabeledPrice,
     ReactionTypeEmoji,
+    ReactionTypeCustomEmoji,
 )
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
@@ -429,6 +430,19 @@ def count_admin_topics(uid: int) -> int:
 def count_sub_admins(admin_uid: int) -> int:
     return sum(1 for v in load_admins().values() if v.get("added_by") == admin_uid)
 
+def mdesc(s) -> str:
+    """Legacy Markdown (parse_mode='Markdown') uchun maxsus belgilarni
+    escape qiladi. Foydalanuvchi kiritgan ixtiyoriy matnni (masalan
+    display_name yoki topic nomi) Markdown xabarlariga xavfsiz qo'yish
+    uchun ishlatiladi — aks holda bitta toq '_' yoki '*' butun xabarni
+    'Can't parse entities' xatosi bilan qulatib yuborishi mumkin."""
+    if s is None:
+        return ""
+    s = str(s)
+    for ch in ("\\", "_", "*", "`", "["):
+        s = s.replace(ch, "\\" + ch)
+    return s
+
 def get_display_name(uid: int, fallback: str) -> str:
     if uid == SUPERADMIN:
         return load_config().get("display_name", fallback)
@@ -677,6 +691,32 @@ async def send_lightning_reaction(bot, chat_id: int, msg_id: int):
         )
     except Exception as e:
         logger.debug(f"Lightning reaction error: {e}")
+
+async def send_named_reaction(bot, chat_id: int, msg_id: int, emoji: str):
+    """Berilgan standart Telegram reaksiya emojisi bilan reaksiya bosadi."""
+    try:
+        await bot.set_message_reaction(
+            chat_id=chat_id,
+            message_id=msg_id,
+            reaction=[ReactionTypeEmoji(emoji=emoji)],
+            is_big=False,
+        )
+    except Exception as e:
+        logger.debug(f"Named reaction error: {e}")
+
+async def send_custom_reaction(bot, chat_id: int, msg_id: int, custom_emoji_id: str):
+    """Premium/animatsion custom_emoji_id bo'yicha reaksiya bosadi.
+    Eslatma: custom emoji reaksiyalar faqat Telegram Premium bilan bog'liq
+    guruh sozlamalarida ishlaydi."""
+    try:
+        await bot.set_message_reaction(
+            chat_id=chat_id,
+            message_id=msg_id,
+            reaction=[ReactionTypeCustomEmoji(custom_emoji_id=custom_emoji_id)],
+            is_big=False,
+        )
+    except Exception as e:
+        logger.debug(f"Custom reaction error: {e}")
 
 # ══════════════════════════════════════════════════════
 #  SUPERGROUP FORUM TOPICS
@@ -1054,9 +1094,12 @@ async def _save_q(update: Update, context: ContextTypes.DEFAULT_TYPE):
     kb = InlineKeyboardMarkup([
         [IKB("➕ Yana savol", callback_data="addq_continue"),
          IKB("⏹ Tugatish",   callback_data="addq_finish")],
-    ]) if cnt < mq else None
+        [IKB("🏠 Bosh menyu", callback_data="menu:back" if is_admin_or_superadmin(uid) else "u:back")],
+    ]) if cnt < mq else InlineKeyboardMarkup([
+        [IKB("🏠 Bosh menyu", callback_data="menu:back" if is_admin_or_superadmin(uid) else "u:back")],
+    ])
     await update.message.reply_text(
-        f"✅ *Savol saqlandi!* {icon}\n📊 {t['emoji']} {tn}: {cnt}/{mq}",
+        f"✅ *Savol saqlandi!* {icon}\n📊 {t['emoji']} {mdesc(tn)}: {cnt}/{mq}",
         parse_mode="Markdown", reply_markup=kb)
 
 # ══════════════════════════════════════════════════════
@@ -1074,7 +1117,7 @@ async def send_question(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
     g["asked"] += 1
     g["current"] = q
     cap = (f"{g['emoji']} *Savol {g['asked']}/{len(g['questions'])}*\n\n"
-           f"❓ {q['question']}\n\n↩️ Reply qilib javob bering:")
+           f"❓ {mdesc(q['question'])}\n\n↩️ Reply qilib javob bering:")
     mt = q.get("media_type", "none")
     fi = q.get("file_id")
     try:
@@ -1104,7 +1147,7 @@ async def _check_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user    = update.effective_user
     uid_s   = str(user.id)
     raw_nm  = user.first_name or "Anonim"
-    dname   = get_display_name(user.id, raw_nm)
+    dname   = mdesc(get_display_name(user.id, raw_nm))
     ans     = update.message.text.strip().lower()
     correct = g["current"]["answer"].lower()
     alts    = [a.lower() for a in g["current"].get("alternatives", [])]
@@ -1119,9 +1162,9 @@ async def _check_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"✅ *TO'G'RI!* 🎉\n👤 {dname}: {ball} ball\n\n⏩ Keyingi...",
             parse_mode="Markdown")
     else:
-        alt_t = f"\n➕ Shuningdek: _{', '.join(alts)}_" if alts else ""
+        alt_t = f"\n➕ Shuningdek: _{mdesc(', '.join(alts))}_" if alts else ""
         await update.message.reply_text(
-            f"❌ *XATO!*\n✅ To'g'ri: *{correct}*{alt_t}\n\n⏩ Keyingi...",
+            f"❌ *XATO!*\n✅ To'g'ri: *{mdesc(correct)}*{alt_t}\n\n⏩ Keyingi...",
             parse_mode="Markdown")
     g["waiting"] = False
     if g["asked"] >= len(g["questions"]):
@@ -1141,14 +1184,14 @@ async def finish_game(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
     ss      = sorted(g["scores"].items(), key=lambda x: x[1]["count"], reverse=True)
     max_sc  = ss[0][1]["count"]
     medals  = ["🥇", "🥈", "🥉"]
-    winners = [get_display_name(int(uid_s), d["name"]) for uid_s, d in ss
+    winners = [mdesc(get_display_name(int(uid_s), d["name"])) for uid_s, d in ss
                if d["count"] == max_sc]
     hdr = (f"🏆 *G'OLIB: {winners[0]}* 🏆" if len(winners) == 1
            else f"🏆 *G'OLIBLAR: {', '.join(winners)}* 🏆")
     res = f"{hdr}\n📊 {max_sc}/{len(g['questions'])}\n\n📋 *Natijalar:*\n"
     for i, (uid_s, d) in enumerate(ss[:10]):
         m  = medals[i] if i < 3 else f"{i+1}."
-        dn = get_display_name(int(uid_s), d["name"])
+        dn = mdesc(get_display_name(int(uid_s), d["name"]))
         res += f"{m} {dn}: {d['count']} ball\n"
     prize = t.get("prize") if t else None
     try:
@@ -1200,14 +1243,16 @@ async def _finalize_addadmin(q, context: ContextTypes.DEFAULT_TYPE,
                   f"\n   Max sub-admin: {sub_s.get('max_admins','?')}"
                   f"\n   Sub-admin topic: {sub_s.get('max_topic_limit','?')}"
                   f"\n   Sub-admin savol: {sub_s.get('max_questions_per_topic','?')}")
-    dn_str = f"\n🏷 Nom: {display_name}" if display_name else ""
+    dn_str = f"\n🏷 Nom: {mdesc(display_name)}" if display_name else ""
     await q.edit_message_text(
         f"✅ *Admin qo'shildi!*\n\n"
         f"👤 UID: `{new_uid}`\n"
         f"📁 Topic limiti: {tlim} ta\n"
         f"❓ Savol limiti: {mq} ta/topic{dn_str}{ca_str}\n\n"
-        f"Jami adminlar: {len(adm)} ta",
-        parse_mode="Markdown")
+        f"Jami adminlar: {len(adm)} ta\n\n"
+        f"🎭 *Bu adminning guruhdagi xabarlariga qanday reaksiya bosay?*",
+        parse_mode="Markdown",
+        reply_markup=_reaction_pick_kb(new_uid))
 
 # ══════════════════════════════════════════════════════
 #  RELAY
@@ -1232,6 +1277,51 @@ async def _relay(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ══════════════════════════════════════════════════════
 #  KEYBOARDS
 # ══════════════════════════════════════════════════════
+
+REACTION_EMOJIS = [e.value for e in ReactionEmoji]
+_REACTION_PAGE_SIZE = 40  # 8 ustun x 5 qator
+
+def _reaction_pick_kb(target_uid: int, page: int = 0) -> InlineKeyboardMarkup:
+    """Superadmin yangi admin qo'shganda, o'sha admin xabarlariga qanday
+    reaksiya bosilishini tanlash uchun klaviatura."""
+    start = page * _REACTION_PAGE_SIZE
+    chunk = REACTION_EMOJIS[start:start + _REACTION_PAGE_SIZE]
+    rows, row = [], []
+    for e in chunk:
+        row.append(IKB(e, callback_data=f"admreact:{target_uid}:{e}"))
+        if len(row) == 8:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    nav = []
+    if page > 0:
+        nav.append(IKB("⬅️", callback_data=f"admreact_page:{target_uid}:{page-1}"))
+    if start + _REACTION_PAGE_SIZE < len(REACTION_EMOJIS):
+        nav.append(IKB("➡️", callback_data=f"admreact_page:{target_uid}:{page+1}"))
+    if nav:
+        rows.append(nav)
+    rows.append([IKB("🆔 ID bilan (premium/animatsion)", callback_data=f"admreact_custom:{target_uid}")])
+    rows.append([IKB("⏭ O'tkazib yuborish (standart: 🔥)", callback_data=f"admreact_skip:{target_uid}")])
+    return InlineKeyboardMarkup(rows)
+
+def _after_action_kb(topic_name: str = None) -> InlineKeyboardMarkup:
+    """Topic yaratilgach yoki savol qo'shilgach ko'rsatiladigan
+    'Bosh menyu' + 'Topicga savol qo'shish' tugmalari."""
+    rows = []
+    if topic_name:
+        rows.append([IKB("➕ Topicga savol qo'shish", callback_data=f"addq_topic:{topic_name}")])
+    rows.append([IKB("🏠 Bosh menyu", callback_data="menu:back")])
+    return InlineKeyboardMarkup(rows)
+
+def _after_action_kb_user(topic_name: str = None) -> InlineKeyboardMarkup:
+    """Oddiy foydalanuvchi uchun xuddi shu tugmalar, faqat 'bosh menyu'
+    userning o'z menyusiga qaytaradi."""
+    rows = []
+    if topic_name:
+        rows.append([IKB("➕ Topicga savol qo'shish", callback_data=f"addq_topic:{topic_name}")])
+    rows.append([IKB("🏠 Bosh menyu", callback_data="u:back")])
+    return InlineKeyboardMarkup(rows)
 
 def _access_kb(topic_name: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
@@ -1398,7 +1488,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Guruhda
     if chat.type in ("group", "supergroup"):
         topics = all_topics()
-        names  = ", ".join(f"{t['emoji']}{t['name']}" for t in topics) if topics else "hali yo'q"
+        names  = ", ".join(f"{t['emoji']}{mdesc(t['name'])}" for t in topics) if topics else "hali yo'q"
         await update.message.reply_text(
             "🎮 *Quiz Bot*\n\n"
             f"📚 Mavjud topiclar: {names}\n\n"
@@ -1409,7 +1499,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     raw = user.first_name or "Admin"
-    dn  = get_display_name(uid, raw)
+    dn  = mdesc(get_display_name(uid, raw))
 
     if is_superadmin(uid):
         await update.message.reply_text(
@@ -1518,12 +1608,12 @@ async def _handle_user_menu(q, uid: int, data: str, context: ContextTypes.DEFAUL
             await q.edit_message_text("📭 Sizning topiclaringiz yo'q.",
                                       reply_markup=kb)
             return
-        lines = [f"{t['emoji']} *{t['name']}* — {len(t['questions'])} savol"
-                 for t in topics]
-        kb = InlineKeyboardMarkup([[IKB("⬅️ Orqaga", callback_data="u:back")]])
+        btns = [[IKB(f"{t['emoji']} {t['name']} ({len(t['questions'])} savol)",
+                     callback_data=f"topic_detail:{t['name']}:u")] for t in topics]
+        btns.append([IKB("⬅️ Orqaga", callback_data="u:back")])
         await q.edit_message_text(
-            f"📋 *Topiclaringiz ({len(topics)} ta):*\n\n" + "\n".join(lines),
-            parse_mode="Markdown", reply_markup=kb)
+            f"📋 *Topiclaringiz ({len(topics)} ta):*\n\nTafsilot uchun tanlang:",
+            parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(btns))
         return
 
     if data == "u:newtopic":

@@ -430,3 +430,114 @@ async def test_regular_user_can_type_name_via_newtopic_name_prompt(
 
     assert ctx.user_data.get("step") == "newtopic_emoji"
     assert ctx.user_data.get("topic_name") == "geography"
+
+
+# ══════════════════════════════════════════════════════
+# Section 3 — yangi funksiyalar (bulk-qo'shish tugmasi,
+# topic/savol yaratilgach ko'rinadigan tugmalar, admin reaksiyasi)
+# ══════════════════════════════════════════════════════
+
+@pytest.mark.asyncio
+async def test_bulkq_topic_button_enters_bulk_mode(bot, make_callback_update, make_context):
+    """'📥 Ommaviy' tugmasi bosilganda bulkq_waiting bosqichiga o'tishi kerak."""
+    bot.save_topic({"name": "english", "emoji": "🔤", "created_by": REGULAR_USER,
+                     "access": {"type": "all", "allowed": []}, "questions": []})
+    ctx = make_context(bot=AsyncMock())
+    update = make_callback_update(REGULAR_USER, "bulkq_topic:english")
+
+    await bot.callback_handler(update, ctx)
+
+    assert ctx.user_data.get("step") == "bulkq_waiting"
+    assert ctx.user_data.get("topic_name") == "english"
+
+
+@pytest.mark.asyncio
+async def test_bulk_add_parses_question_answer_synonyms_format(
+        bot, make_text_update, make_context):
+    """'orange - apelsin - olovrang - sabzirang' formatidagi qatorlar
+    savol/javob/sinonimlar sifatida to'g'ri saqlanishi kerak."""
+    bot.save_topic({"name": "english", "emoji": "🔤", "created_by": REGULAR_USER,
+                     "access": {"type": "all", "allowed": []}, "questions": []})
+    ctx = make_context()
+    ctx.user_data.update({"step": "bulkq_waiting", "topic_name": "english"})
+    update = make_text_update(
+        REGULAR_USER, "orange - apelsin - olovrang - sabzirang\napple - olma")
+
+    await bot._process_bulkq(update, ctx)
+
+    topic = bot.load_topic("english")
+    assert len(topic["questions"]) == 2
+    q1 = topic["questions"][0]
+    assert q1["question"] == "orange"
+    assert q1["answer"] == "apelsin"
+    assert q1["alternatives"] == ["olovrang", "sabzirang"]
+
+
+@pytest.mark.asyncio
+async def test_topic_creation_shows_after_action_buttons(
+        bot, make_callback_update, make_context):
+    """Topic yaratilib access tanlangach, 'Bosh menyu' va
+    'Topicga savol qo'shish' tugmalari ko'rinishi kerak."""
+    bot.save_topic({"name": "math", "emoji": "🔢", "created_by": REGULAR_USER,
+                     "access": {"type": "all", "allowed": []}, "questions": []})
+    ctx = make_context(bot=AsyncMock())
+    ctx.user_data["step"] = "newtopic_access"
+    update = make_callback_update(REGULAR_USER, "acc:owner:math")
+
+    await bot.callback_handler(update, ctx)
+
+    markup = update.callback_query.last_markup
+    assert markup is not None
+    flat_cbs = [btn.callback_data for row in markup.inline_keyboard for btn in row]
+    assert f"addq_topic:math" in flat_cbs
+    assert "u:back" in flat_cbs
+    assert ctx.user_data == {}
+
+
+@pytest.mark.asyncio
+async def test_admreact_saves_named_emoji_for_admin(bot, make_callback_update, make_context):
+    """Superadmin ro'yxatdagi emojini tansa, admin yozuviga saqlanishi kerak."""
+    bot.save_admins({str(REGULAR_USER): {"topic_limit": 1, "max_questions": 10}})
+    ctx = make_context(bot=AsyncMock())
+    update = make_callback_update(SUPERADMIN_ID, f"admreact:{REGULAR_USER}:🔥")
+
+    await bot.callback_handler(update, ctx)
+
+    adm = bot.load_admins()
+    assert adm[str(REGULAR_USER)]["reaction_emoji"] == "🔥"
+
+
+@pytest.mark.asyncio
+async def test_admreact_custom_id_saved_via_text_step(bot, make_text_update, make_context):
+    """'ID bilan' tanlab, raqamli custom_emoji_id yuborilsa saqlanishi kerak."""
+    bot.save_admins({str(REGULAR_USER): {"topic_limit": 1, "max_questions": 10}})
+    ctx = make_context()
+    ctx.user_data.update({"step": "admreact_custom_wait", "ar_target": REGULAR_USER})
+    update = make_text_update(SUPERADMIN_ID, "5368324170671202286")
+
+    await bot.handle_text(update, ctx)
+
+    adm = bot.load_admins()
+    assert adm[str(REGULAR_USER)]["reaction_custom_emoji_id"] == "5368324170671202286"
+
+
+@pytest.mark.asyncio
+async def test_admreact_non_digit_id_rejected(bot, make_text_update, make_context):
+    bot.save_admins({str(REGULAR_USER): {"topic_limit": 1, "max_questions": 10}})
+    ctx = make_context()
+    ctx.user_data.update({"step": "admreact_custom_wait", "ar_target": REGULAR_USER})
+    update = make_text_update(SUPERADMIN_ID, "not-a-number")
+
+    await bot.handle_text(update, ctx)
+
+    adm = bot.load_admins()
+    assert "reaction_custom_emoji_id" not in adm[str(REGULAR_USER)]
+
+
+def test_reaction_pick_kb_builds_without_error(bot):
+    kb = bot._reaction_pick_kb(REGULAR_USER, page=0)
+    flat_cbs = [btn.callback_data for row in kb.inline_keyboard for btn in row]
+    assert any(cb.startswith(f"admreact:{REGULAR_USER}:") for cb in flat_cbs)
+    assert f"admreact_custom:{REGULAR_USER}" in flat_cbs
+    assert f"admreact_skip:{REGULAR_USER}" in flat_cbs
+
