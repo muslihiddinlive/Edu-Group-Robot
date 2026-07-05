@@ -541,3 +541,12 @@ def test_reaction_pick_kb_builds_without_error(bot):
     assert f"admreact_custom:{REGULAR_USER}" in flat_cbs
     assert f"admreact_skip:{REGULAR_USER}" in flat_cbs
 
+
+def test_set_and_get_supergroup_id(bot):
+    """Superadmin /setgroup orqali DB guruhni dinamik almashtira olishi kerak."""
+    assert bot.get_supergroup_id() == 0
+    bot.set_supergroup_id(-1009999999999)
+    assert bot.get_supergroup_id() == -1009999999999
+    bot.set_supergroup_id(None)
+    assert bot.get_supergroup_id() == 0
+

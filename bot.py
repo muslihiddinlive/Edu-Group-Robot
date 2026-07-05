@@ -815,13 +815,92 @@ async def cmd_delbotmsg(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ O'chirib bo'lmadi:\n`{e}`",
                                         parse_mode="Markdown")
 
+async def cmd_setgroup(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """DB/backup guruhni ulash yoki almashtirish.
+    - Guruhning ICHIDA argumentsiz yuborilsa — o'sha guruh ulanadi.
+    - Yoki: /setgroup -100123456789
+    - O'chirish: /setgroup 0"""
+    if not is_superadmin(update.effective_user.id):
+        return
+    args = context.args
+    chat = update.effective_chat
+
+    if not args:
+        if chat.type in ("group", "supergroup"):
+            gid = chat.id
+        else:
+            cur = get_supergroup_id()
+            await update.message.reply_text(
+                f"🔗 *Hozirgi DB guruh:* `{cur or 'ulanmagan'}`\n\n"
+                "Ulash uchun ikki yo'l bor:\n"
+                "1️⃣ Kerakli guruhning ICHIDA shunchaki `/setgroup` yuboring\n"
+                "2️⃣ Yoki: `/setgroup -100123456789`\n\n"
+                "❌ Uzish: `/setgroup 0`",
+                parse_mode="Markdown")
+            return
+    else:
+        try:
+            gid = int(args[0])
+        except ValueError:
+            await update.message.reply_text("❌ Guruh ID raqam bo'lishi kerak.")
+            return
+
+    if gid == 0:
+        set_supergroup_id(None)
+        await update.message.reply_text("✅ DB guruh uzildi.")
+        return
+
+    # Bot shu guruhda admin ekanligini va supergroup ekanligini tekshiramiz
+    try:
+        target_chat = await context.bot.get_chat(gid)
+    except Exception as e:
+        await update.message.reply_text(
+            f"❌ Bu guruhga yeta olmadim:\n`{e}`\n\n"
+            "Bot o'sha guruhga qo'shilganiga va admin ekanligiga ishonch hosil qiling.",
+            parse_mode="Markdown")
+        return
+
+    is_forum = getattr(target_chat, "is_forum", False)
+    try:
+        bm = await context.bot.get_chat_member(gid, context.bot.id)
+        bot_is_admin = bm.status in ("administrator", "creator")
+    except Exception:
+        bot_is_admin = False
+
+    set_supergroup_id(gid)
+
+    warn = ""
+    if not bot_is_admin:
+        warn += "\n⚠️ Bot bu guruhda *admin emas* — backup/topic funksiyalari ishlamaydi!"
+    if target_chat.type == "supergroup" and not is_forum:
+        warn += ("\n⚠️ Bu supergroup, lekin *Topics (Forum)* rejimi o'chiq — "
+                 "guruh sozlamalaridan yoqing, aks holda VIP/Premium/Backup "
+                 "topic'lari yaratilmaydi.")
+    elif target_chat.type == "group":
+        warn += ("\n⚠️ Bu oddiy guruh — Topics (Forum) rejimi faqat "
+                 "supergroup'larda ishlaydi, shu sabab backup/tarif topic'lari "
+                 "yaratilmaydi (lekin export/restore funksiyasi baribir ishlaydi).")
+
+    await update.message.reply_text(
+        f"✅ *DB guruh ulandi!*\n\n"
+        f"🏷 Nomi: {mdesc(target_chat.title or '—')}\n"
+        f"🆔 ID: `{gid}`{warn}\n\n"
+        "Zaxira nusxa olib ko'ramiz...",
+        parse_mode="Markdown")
+
+    ok = await do_export(context.bot, to_backup_topic=True)
+    await update.message.reply_text(
+        "✅ Sinov zaxira nusxasi muvaffaqiyatli yuborildi!" if ok
+        else "❌ Zaxira nusxa olishda xatolik — botga tegishli huquqlarni tekshiring.")
+
 async def cmd_createtopic(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Supergroup'da forum topic yaratish. /createtopic <nom>"""
     if not is_superadmin(update.effective_user.id):
         return
-    if not SUPERGROUP_ID:
+    if not get_supergroup_id():
         await update.message.reply_text(
-            "❌ SUPERGROUP_ID ENV o'zgaruvchisi o'rnatilmagan!")
+            "❌ DB guruh ulanmagan! Avval `/setgroup` bilan ulang.",
+            parse_mode="Markdown")
         return
     args = context.args
     if not args:
@@ -2502,6 +2581,7 @@ async def run_bot():
         ("delmsgs",         cmd_delmsgs),
         ("delbotmsg",       cmd_delbotmsg),
         ("createtopic",     cmd_createtopic),
+        ("setgroup",        cmd_setgroup),
         ("userinfo",        cmd_userinfo),
         ("listusers",       cmd_listusers),
     ]
@@ -2557,6 +2637,18 @@ async def run_bot():
 
     logger.info("Zahiradan avtomatik tiklash...")
     await auto_restore_on_startup(app.bot)
+
+    if not core.get_supergroup_id():
+        try:
+            await app.bot.send_message(
+                SUPERADMIN,
+                "⚠️ *Bot ishga tushdi, lekin DB guruh ulanmagan!*\n\n"
+                "Zaxira nusxalash va VIP/Premium/PLUS topic'lari ishlashi uchun "
+                "kerakli guruhning ICHIDA `/setgroup` buyrug'ini yuboring "
+                "(yoki `/setgroup -100...` orqali tashqaridan).",
+                parse_mode="Markdown")
+        except Exception:
+            pass
 
     async def telegram_webhook(request: web.Request) -> web.Response:
         if WEBHOOK_SECRET:

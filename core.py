@@ -60,7 +60,26 @@ def _require_env(key: str) -> str:
 
 BOT_TOKEN      = _require_env("BOT_TOKEN")
 SUPERADMIN     = int(_require_env("SUPERADMIN_ID"))
-SUPERGROUP_ID  = int(os.environ.get("SUPERGROUP_ID", "0"))
+SUPERGROUP_ID_ENV = int(os.environ.get("SUPERGROUP_ID", "0"))
+
+def get_supergroup_id() -> int:
+    """DB/backup guruh ID'si. Avval config.json'dagi dinamik (superadmin
+    /setgroup orqali o'rnatgan) qiymatga, bo'lmasa ENV o'zgaruvchisiga
+    qaraydi. Bu superadminga botni qayta deploy qilmasdan turib
+    xohlagan guruhga ulanish imkonini beradi."""
+    cfg = load_config()
+    gid = cfg.get("supergroup_id")
+    if gid:
+        return int(gid)
+    return SUPERGROUP_ID_ENV
+
+def set_supergroup_id(gid: int | None):
+    cfg = load_config()
+    if gid:
+        cfg["supergroup_id"] = gid
+    else:
+        cfg.pop("supergroup_id", None)
+    save_config(cfg)
 
 PORT           = int(os.environ.get("PORT", "8080"))
 WEBHOOK_URL    = (os.environ.get("WEBHOOK_URL")
@@ -733,14 +752,15 @@ def save_forum_topics(data: dict):
 
 async def ensure_forum_topic(bot, name: str, key: str, icon_color: int = 0x6FB9F0) -> int | None:
     """Topic mavjud bo'lmasa yaratadi, ID qaytaradi."""
-    if not SUPERGROUP_ID:
+    gid = get_supergroup_id()
+    if not gid:
         return None
     ft = get_forum_topics()
     if key in ft:
         return ft[key]
     try:
         result = await bot.create_forum_topic(
-            chat_id=SUPERGROUP_ID,
+            chat_id=gid,
             name=name,
             icon_color=icon_color,
         )
@@ -777,7 +797,8 @@ async def get_backup_topic_id(bot) -> int | None:
 
 async def update_tarif_topic_json(bot, tarif: str):
     """Tarif topic'idagi userlar JSON'ini yangilaydi (max 20 user/xabar)."""
-    if not SUPERGROUP_ID:
+    gid = get_supergroup_id()
+    if not gid:
         return
     tid = await get_tarif_topic_id(bot, tarif)
     if not tid:
@@ -795,7 +816,7 @@ async def update_tarif_topic_json(bot, tarif: str):
         buf.name = f"{tarif}_users_{i//chunk_size + 1}.json"
         try:
             sent = await bot.send_document(
-                chat_id=SUPERGROUP_ID,
+                chat_id=gid,
                 document=buf,
                 caption=f"📋 {TARIF_NAMES.get(tarif)} | {len(chunk)} ta user | chunk {i//chunk_size+1}",
                 message_thread_id=tid,
@@ -803,12 +824,12 @@ async def update_tarif_topic_json(bot, tarif: str):
             # Oxirgi chunkni pin qilamiz
             if i + chunk_size >= len(tarif_users):
                 try:
-                    await bot.unpin_all_chat_messages(SUPERGROUP_ID)
+                    await bot.unpin_all_chat_messages(gid)
                 except Exception:
                     pass
                 try:
                     await bot.pin_chat_message(
-                        SUPERGROUP_ID, sent.message_id, disable_notification=True)
+                        gid, sent.message_id, disable_notification=True)
                 except Exception:
                     pass
         except Exception as e:
@@ -826,8 +847,9 @@ async def create_class_topic(bot, class_name: str) -> int | None:
 async def do_export(bot, to_backup_topic: bool = True) -> bool:
     """Export qiladi — faqat supergroup backup topic'iga.
     message_id config.json'da saqlanadi, restart'da o'sha orqali restore."""
-    if not SUPERGROUP_ID:
-        logger.warning("Export: SUPERGROUP_ID yo'q!")
+    gid = get_supergroup_id()
+    if not gid:
+        logger.warning("Export: DB guruh ulanmagan (SUPERGROUP_ID/set_supergroup_id)!")
         return False
     now    = datetime.now(TZ)
     topics = all_topics()
@@ -860,7 +882,7 @@ async def do_export(bot, to_backup_topic: bool = True) -> bool:
         return False
     try:
         sent = await bot.send_document(
-            chat_id=SUPERGROUP_ID,
+            chat_id=gid,
             document=buf,
             caption=cap,
             parse_mode="Markdown",
@@ -880,7 +902,7 @@ async def do_export(bot, to_backup_topic: bool = True) -> bool:
         # Supergroup'da pin qilamiz
         try:
             await bot.pin_chat_message(
-                SUPERGROUP_ID, sent.message_id, disable_notification=True)
+                gid, sent.message_id, disable_notification=True)
         except Exception as e:
             logger.warning(f"Backup pin error: {e}")
         logger.info(f"Export OK: msg_id={sent.message_id}, thread={tid}")
@@ -942,16 +964,17 @@ async def auto_restore_on_startup(bot) -> None:
     if not msg_id:
         logger.info("Auto-restore: oldingi backup topilmadi — bo'sh boshlanadi.")
         return
-    if not SUPERGROUP_ID:
-        logger.warning("Auto-restore: SUPERGROUP_ID yo'q!")
+    gid = get_supergroup_id()
+    if not gid:
+        logger.warning("Auto-restore: DB guruh ulanmagan!")
         return
 
     fwd = None
     try:
         # Backup xabarini o'ziga forward qilib, document'ini olamiz
         fwd = await bot.forward_message(
-            chat_id=SUPERGROUP_ID,
-            from_chat_id=SUPERGROUP_ID,
+            chat_id=gid,
+            from_chat_id=gid,
             message_id=msg_id,
             disable_notification=True,
         )
@@ -968,7 +991,7 @@ async def auto_restore_on_startup(bot) -> None:
         # Forward orqali yaratilgan vaqtinchalik nusxani tozalaymiz
         if fwd is not None:
             try:
-                await bot.delete_message(SUPERGROUP_ID, fwd.message_id)
+                await bot.delete_message(gid, fwd.message_id)
             except Exception:
                 pass
 
@@ -1030,24 +1053,25 @@ async def _do_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def _pin_media(bot, mt: str, fi: str, caption: str = "") -> str | None:
     """Media faylni supergroup backup topic'iga yuborib, barqaror file_id oladi."""
-    if not SUPERGROUP_ID:
-        return fi  # supergroup yo'q bo'lsa original file_id qaytaramiz
+    gid = get_supergroup_id()
+    if not gid:
+        return fi  # DB guruh ulanmagan bo'lsa original file_id qaytaramiz
     tid = await get_backup_topic_id(bot)
     try:
         if mt == "photo":
-            s = await bot.send_photo(SUPERGROUP_ID, fi, caption=caption[:1024],
+            s = await bot.send_photo(gid, fi, caption=caption[:1024],
                                      message_thread_id=tid)
             return s.photo[-1].file_id
         if mt == "video":
-            s = await bot.send_video(SUPERGROUP_ID, fi, caption=caption[:1024],
+            s = await bot.send_video(gid, fi, caption=caption[:1024],
                                      message_thread_id=tid)
             return s.video.file_id
         if mt == "gif":
-            s = await bot.send_animation(SUPERGROUP_ID, fi, caption=caption[:1024],
+            s = await bot.send_animation(gid, fi, caption=caption[:1024],
                                          message_thread_id=tid)
             return s.animation.file_id
         if mt == "sticker":
-            s = await bot.send_sticker(SUPERGROUP_ID, fi, message_thread_id=tid)
+            s = await bot.send_sticker(gid, fi, message_thread_id=tid)
             return s.sticker.file_id
     except Exception as e:
         logger.warning(f"pin_media ({mt}): {e}")
