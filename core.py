@@ -17,7 +17,15 @@ YANGI (v5.0):
 KERAKLI ENV:
   BOT_TOKEN, SUPERADMIN_ID, WEBHOOK_URL (yoki RENDER_EXTERNAL_URL)
   WEBHOOK_SECRET (ixtiyoriy)
-  SUPERGROUP_ID  - forum topic ochish uchun supergroup ID
+  SUPERGROUP_ID    - (ixtiyoriy, orqaga moslik uchun) boshlang'ich DB guruh
+  CONTROL_GROUP_ID - (tavsiya etiladi) doimiy, oddiy (forum emas) nazorat
+                     guruhi. Bot shu yerda admin bo'lib, bitta pin xabarda
+                     "qaysi DB guruh ishlatilyapti" va "oxirgi backup
+                     qayerda" ma'lumotini saqlaydi. Bu qiymat hech qachon
+                     o'zgartirilmaydi — shunda /setgroup orqali DB guruh
+                     almashtirilsa ham, Render disk tozalansa ham (deploy/
+                     redeploy) ma'lumot yo'qolmaydi, chunki u to'liq
+                     Telegram'da (config.json emas) turadi.
 """
 
 import asyncio, io, json, os, random, logging, re
@@ -62,24 +70,78 @@ BOT_TOKEN      = _require_env("BOT_TOKEN")
 SUPERADMIN     = int(_require_env("SUPERADMIN_ID"))
 SUPERGROUP_ID_ENV = int(os.environ.get("SUPERGROUP_ID", "0"))
 
+# CONTROL_GROUP_ID — doimiy, oddiy (forum emas) nazorat guruhi. Bot shu
+# yerda admin bo'lib, bitta pin xabarda "qaysi DB guruh ishlatilyapti" va
+# "oxirgi backup qayerda" degan ma'lumotni saqlaydi. Bu ma'lumot to'liq
+# Telegram'da turadi — Render disk tozalansa ham yo'qolmaydi (config.json'dan
+# farqli). Ixtiyoriy: berilmasa, tizim eski (faqat ENV/config.json asosidagi)
+# rejimda ishlashda davom etadi.
+CONTROL_GROUP_ID = int(os.environ.get("CONTROL_GROUP_ID", "0")) or None
+CONTROL_TAG      = "BOT-CONTROL-DATA::"
+
+_SUPERGROUP_ID_CACHE: int | None = None  # runtime kesh (tez, sync o'qish uchun)
+
 def get_supergroup_id() -> int:
-    """DB/backup guruh ID'si. Avval config.json'dagi dinamik (superadmin
-    /setgroup orqali o'rnatgan) qiymatga, bo'lmasa ENV o'zgaruvchisiga
-    qaraydi. Bu superadminga botni qayta deploy qilmasdan turib
-    xohlagan guruhga ulanish imkonini beradi."""
-    cfg = load_config()
-    gid = cfg.get("supergroup_id")
-    if gid:
-        return int(gid)
+    """DB/backup guruh ID'si. Xotiradagi keshdan o'qiydi (tez, sync) — bu
+    kesh bot ishga tushganda (auto_restore_on_startup) yoki /setgroup
+    orqali (set_supergroup_id) control guruhdan to'ldiriladi/yangilanadi.
+    Hali sozlanmagan bo'lsa, eski ENV fallback'ga qaytadi (orqaga moslik)."""
+    if _SUPERGROUP_ID_CACHE:
+        return _SUPERGROUP_ID_CACHE
     return SUPERGROUP_ID_ENV
 
-def set_supergroup_id(gid: int | None):
-    cfg = load_config()
+async def load_control_data(bot) -> dict:
+    """CONTROL_GROUP_ID ichidagi pin xabardan konfiguratsiya o'qiydi."""
+    if not CONTROL_GROUP_ID:
+        return {}
+    try:
+        chat   = await bot.get_chat(CONTROL_GROUP_ID)
+        pinned = chat.pinned_message
+        if not pinned or not pinned.text or not pinned.text.startswith(CONTROL_TAG):
+            return {}
+        return json.loads(pinned.text[len(CONTROL_TAG):])
+    except Exception as e:
+        logger.warning(f"Control group o'qib bo'lmadi: {e}")
+        return {}
+
+async def save_control_data(bot, data: dict) -> bool:
+    """Control guruhdagi pin xabarni yangilaydi (yo'q bo'lsa yaratadi+pin qiladi)."""
+    if not CONTROL_GROUP_ID:
+        logger.warning("CONTROL_GROUP_ID yo'q — control ma'lumot faqat joriy "
+                        "jarayon xotirasida qoladi, disk tozalansa yo'qoladi!")
+        return False
+    text = CONTROL_TAG + json.dumps(data, ensure_ascii=False)
+    try:
+        chat   = await bot.get_chat(CONTROL_GROUP_ID)
+        pinned = chat.pinned_message
+        if pinned and pinned.text and pinned.text.startswith(CONTROL_TAG):
+            await bot.edit_message_text(
+                chat_id=CONTROL_GROUP_ID, message_id=pinned.message_id, text=text)
+        else:
+            sent = await bot.send_message(CONTROL_GROUP_ID, text)
+            await bot.pin_chat_message(
+                CONTROL_GROUP_ID, sent.message_id, disable_notification=True)
+        return True
+    except Exception as e:
+        logger.error(f"Control ma'lumotni saqlab bo'lmadi: {e}")
+        return False
+
+async def set_supergroup_id(bot, gid: int | None) -> None:
+    """Superadmin /setgroup orqali DB guruhni o'rnatadi/almashtiradi. Qiymat
+    (1) darhol xotiradagi keshga, (2) control guruhdagi pin xabarga
+    yoziladi — shu bilan Render qayta deploy/disk tozalashidan
+    ta'sirlanmaydi (config.json'dan farqli o'laroq)."""
+    global _SUPERGROUP_ID_CACHE
+    _SUPERGROUP_ID_CACHE = gid
+    ctrl = await load_control_data(bot)
     if gid:
-        cfg["supergroup_id"] = gid
+        ctrl["supergroup_id"] = gid
     else:
-        cfg.pop("supergroup_id", None)
-    save_config(cfg)
+        ctrl.pop("supergroup_id", None)
+        # guruh uzilganda eski backup ko'rsatkichlari endi mos emas
+        ctrl.pop("last_backup_msg_id", None)
+        ctrl.pop("last_backup_thread_id", None)
+    await save_control_data(bot, ctrl)
 
 PORT           = int(os.environ.get("PORT", "8080"))
 WEBHOOK_URL    = (os.environ.get("WEBHOOK_URL")
@@ -846,10 +908,11 @@ async def create_class_topic(bot, class_name: str) -> int | None:
 
 async def do_export(bot, to_backup_topic: bool = True) -> bool:
     """Export qiladi — faqat supergroup backup topic'iga.
-    message_id config.json'da saqlanadi, restart'da o'sha orqali restore."""
+    message_id endi CONTROL GROUP'da saqlanadi (config.json'da EMAS),
+    shunda Render disk tozalansa ham restore ishlay oladi."""
     gid = get_supergroup_id()
     if not gid:
-        logger.warning("Export: DB guruh ulanmagan (SUPERGROUP_ID/set_supergroup_id)!")
+        logger.warning("Export: DB guruh ulanmagan! /setgroup bilan ulang.")
         return False
     now    = datetime.now(TZ)
     topics = all_topics()
@@ -888,17 +951,12 @@ async def do_export(bot, to_backup_topic: bool = True) -> bool:
             parse_mode="Markdown",
             message_thread_id=tid,
         )
-        # message_id ni config'ga saqlaymiz — restore uchun
-        # (bu yozuv o'zi yana export'ni chaqirib yubormasligi uchun hook vaqtincha o'chiriladi)
-        global _suppress_export_hook
-        _suppress_export_hook = True
-        try:
-            cfg = load_config()
-            cfg["last_backup_msg_id"]      = sent.message_id
-            cfg["last_backup_thread_id"]   = tid
-            save_config(cfg)
-        finally:
-            _suppress_export_hook = False
+        # message_id endi CONTROL GROUP'ga saqlanadi (local disk emas!)
+        ctrl = await load_control_data(bot)
+        ctrl["supergroup_id"]         = gid
+        ctrl["last_backup_msg_id"]    = sent.message_id
+        ctrl["last_backup_thread_id"] = tid
+        await save_control_data(bot, ctrl)
         # Supergroup'da pin qilamiz
         try:
             await bot.pin_chat_message(
@@ -957,16 +1015,24 @@ async def _process_restore(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def auto_restore_on_startup(bot) -> None:
     """Bot ishga tushganda (deploy/redeploy yoki restart — xotira tozalanganda)
-    config.json'dagi last_backup_msg_id orqali eng so'nggi backup'dan
-    avtomatik tiklaydi."""
-    cfg    = load_config()
-    msg_id = cfg.get("last_backup_msg_id")
-    if not msg_id:
-        logger.info("Auto-restore: oldingi backup topilmadi — bo'sh boshlanadi.")
-        return
+    CONTROL_GROUP_ID'dagi pin xabardan qaysi DB guruh ishlatilishini va
+    oxirgi backup qayerdaligini o'qib, avtomatik tiklaydi. Bu ma'lumot
+    to'liq Telegram'da turgani uchun Render disk tozalansa ham yo'qolmaydi."""
+    global _SUPERGROUP_ID_CACHE
+    ctrl = await load_control_data(bot)
+    if ctrl.get("supergroup_id"):
+        _SUPERGROUP_ID_CACHE = ctrl["supergroup_id"]
+
     gid = get_supergroup_id()
     if not gid:
-        logger.warning("Auto-restore: DB guruh ulanmagan!")
+        logger.warning(
+            "DB guruh hali sozlanmagan! Superadmin /setgroup <id> "
+            "bilan o'rnatishi kerak.")
+        return
+
+    msg_id = ctrl.get("last_backup_msg_id")
+    if not msg_id:
+        logger.info("Auto-restore: oldingi backup topilmadi — bo'sh boshlanadi.")
         return
 
     fwd = None
@@ -1331,10 +1397,11 @@ def _reaction_pick_kb(target_uid: int, page: int = 0) -> InlineKeyboardMarkup:
 
 def _after_action_kb(topic_name: str = None) -> InlineKeyboardMarkup:
     """Topic yaratilgach yoki savol qo'shilgach ko'rsatiladigan
-    'Bosh menyu' + 'Topicga savol qo'shish' tugmalari."""
+    'Bosh menyu' + savol qo'shish tugmalari (bitta-bitta / ommaviy)."""
     rows = []
     if topic_name:
-        rows.append([IKB("➕ Topicga savol qo'shish", callback_data=f"addq_topic:{topic_name}")])
+        rows.append([IKB("📝 Bitta-bitta", callback_data=f"addq_topic:{topic_name}"),
+                      IKB("📥 Ommaviy",      callback_data=f"bulkq_topic:{topic_name}")])
     rows.append([IKB("🏠 Bosh menyu", callback_data="menu:back")])
     return InlineKeyboardMarkup(rows)
 
@@ -1343,7 +1410,8 @@ def _after_action_kb_user(topic_name: str = None) -> InlineKeyboardMarkup:
     userning o'z menyusiga qaytaradi."""
     rows = []
     if topic_name:
-        rows.append([IKB("➕ Topicga savol qo'shish", callback_data=f"addq_topic:{topic_name}")])
+        rows.append([IKB("📝 Bitta-bitta", callback_data=f"addq_topic:{topic_name}"),
+                      IKB("📥 Ommaviy",      callback_data=f"bulkq_topic:{topic_name}")])
     rows.append([IKB("🏠 Bosh menyu", callback_data="u:back")])
     return InlineKeyboardMarkup(rows)
 

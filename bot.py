@@ -830,12 +830,17 @@ async def cmd_setgroup(update: Update, context: ContextTypes.DEFAULT_TYPE):
             gid = chat.id
         else:
             cur = get_supergroup_id()
+            note = ("\n\n💾 Bu ma'lumot control guruhda saqlanadi — qayta "
+                     "deploy bo'lsa ham yo'qolmaydi." if CONTROL_GROUP_ID else
+                     "\n\n⚠️ CONTROL_GROUP_ID sozlanmagan — bu qiymat faqat "
+                     "joriy jarayon xotirasida turadi, qayta deploy bo'lsa "
+                     "yo'qoladi!")
             await update.message.reply_text(
                 f"🔗 *Hozirgi DB guruh:* `{cur or 'ulanmagan'}`\n\n"
                 "Ulash uchun ikki yo'l bor:\n"
                 "1️⃣ Kerakli guruhning ICHIDA shunchaki `/setgroup` yuboring\n"
                 "2️⃣ Yoki: `/setgroup -100123456789`\n\n"
-                "❌ Uzish: `/setgroup 0`",
+                f"❌ Uzish: `/setgroup 0`{note}",
                 parse_mode="Markdown")
             return
     else:
@@ -846,7 +851,7 @@ async def cmd_setgroup(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
     if gid == 0:
-        set_supergroup_id(None)
+        await set_supergroup_id(context.bot, None)
         await update.message.reply_text("✅ DB guruh uzildi.")
         return
 
@@ -867,7 +872,7 @@ async def cmd_setgroup(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         bot_is_admin = False
 
-    set_supergroup_id(gid)
+    await set_supergroup_id(context.bot, gid)
 
     warn = ""
     if not bot_is_admin:
@@ -1032,7 +1037,9 @@ async def cmd_addbadword(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_superadmin(update.effective_user.id): return
     args = context.args
     if not args:
-        await update.message.reply_text("❌ `/addbadword so'z`", parse_mode="Markdown"); return
+        context.user_data["step"] = "addbadword_waiting"
+        await update.message.reply_text("✏️ Qo'shmoqchi bo'lgan so'zni yozing:")
+        return
     word = " ".join(args).lower().strip()
     bw   = load_badwords()
     if word in bw["words"] or word in bw["severe_words"]:
@@ -1292,6 +1299,19 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"✅ `{target}` uchun premium/animatsion reaksiya (ID: `{cid}`) belgilandi.",
             parse_mode="Markdown")
+        return
+
+    if step == "addbadword_waiting" and is_superadmin(uid):
+        context.user_data.pop("step", None)
+        word = text.lower().strip()
+        bw   = load_badwords()
+        if word in bw["words"] or word in bw["severe_words"]:
+            await update.message.reply_text(f"⚠️ `{word}` allaqachon ro'yxatda!",
+                                            parse_mode="Markdown")
+            return
+        bw["words"].append(word)
+        save_badwords(bw)
+        await update.message.reply_text(f"✅ So'z qo'shildi: `{word}`", parse_mode="Markdown")
         return
 
     if step == "editadmin_dname" and is_superadmin(uid):

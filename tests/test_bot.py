@@ -542,11 +542,116 @@ def test_reaction_pick_kb_builds_without_error(bot):
     assert f"admreact_skip:{REGULAR_USER}" in flat_cbs
 
 
-def test_set_and_get_supergroup_id(bot):
-    """Superadmin /setgroup orqali DB guruhni dinamik almashtira olishi kerak."""
+@pytest.mark.asyncio
+async def test_set_and_get_supergroup_id(bot):
+    """Superadmin /setgroup orqali DB guruhni dinamik almashtira olishi kerak.
+    CONTROL_GROUP_ID sozlanmagan holatda ham xotiradagi kesh to'g'ri
+    ishlashi kerak (control guruhga yozish shunchaki sukut bilan
+    o'tkazib yuboriladi)."""
     assert bot.get_supergroup_id() == 0
-    bot.set_supergroup_id(-1009999999999)
+    await bot.set_supergroup_id(None, -1009999999999)
     assert bot.get_supergroup_id() == -1009999999999
-    bot.set_supergroup_id(None)
+    await bot.set_supergroup_id(None, None)
     assert bot.get_supergroup_id() == 0
+
+
+@pytest.mark.asyncio
+async def test_control_group_roundtrip(bot, monkeypatch):
+    """CONTROL_GROUP_ID sozlangan bo'lsa, ma'lumot pin xabar orqali
+    to'g'ri yozilishi/o'qilishi va Render disk tozalanishidan keyin ham
+    (config.json'siz) tiklanishi kerak."""
+    monkeypatch.setattr(bot.core, "CONTROL_GROUP_ID", -100555)
+
+    class FakeControlBot:
+        def __init__(self):
+            self.pinned_text = None
+            self.pinned_id = None
+
+        async def get_chat(self, cid):
+            from unittest.mock import MagicMock
+            pm = None
+            if self.pinned_text is not None:
+                pm = MagicMock(text=self.pinned_text, message_id=self.pinned_id)
+            return MagicMock(pinned_message=pm)
+
+        async def send_message(self, chat_id, text):
+            from unittest.mock import MagicMock
+            self.pinned_text = text
+            self.pinned_id = 42
+            return MagicMock(message_id=42)
+
+        async def pin_chat_message(self, chat_id, message_id, disable_notification=True):
+            return True
+
+        async def edit_message_text(self, chat_id, message_id, text):
+            self.pinned_text = text
+            return True
+
+    fake = FakeControlBot()
+    await bot.set_supergroup_id(fake, -100777)
+    assert bot.get_supergroup_id() == -100777
+
+    ctrl = await bot.load_control_data(fake)
+    assert ctrl["supergroup_id"] == -100777
+
+    # Xotiradagi keshni tozalab (Render disk/tuzilma tozalanishini
+    # simulyatsiya qilamiz), faqat control guruhdan bootstrap qilamiz
+    bot._SUPERGROUP_ID_CACHE = None
+    ctrl2 = await bot.load_control_data(fake)
+    assert ctrl2.get("supergroup_id") == -100777
+
+
+def test_set_and_get_supergroup_id_old_name_removed(bot):
+    """Eski sinxron set_supergroup_id endi mavjud emas (async bo'lgan)."""
+    import inspect
+    assert inspect.iscoroutinefunction(bot.set_supergroup_id)
+
+
+# ══════════════════════════════════════════════════════
+# Section 3 — savol qo'shish tanlovi va /addbadword interaktiv oqimi
+# ══════════════════════════════════════════════════════
+
+@pytest.mark.asyncio
+async def test_after_action_kb_offers_single_and_bulk_choice(bot):
+    """Topic yaratilgach chiqadigan tugmalarda ENDI ikkalasi ham
+    bo'lishi kerak: bitta-bitta VA ommaviy (avval faqat bitta-bitta
+    tugma bo'lib, ommaviy variant ko'rinmas edi)."""
+    kb = bot._after_action_kb("english")
+    flat = [(b.text, b.callback_data) for row in kb.inline_keyboard for b in row]
+    assert ("📝 Bitta-bitta", "addq_topic:english") in flat
+    assert ("📥 Ommaviy", "bulkq_topic:english") in flat
+
+    kb_user = bot._after_action_kb_user("english")
+    flat_user = [(b.text, b.callback_data) for row in kb_user.inline_keyboard for b in row]
+    assert ("📝 Bitta-bitta", "addq_topic:english") in flat_user
+    assert ("📥 Ommaviy", "bulkq_topic:english") in flat_user
+
+
+@pytest.mark.asyncio
+async def test_addbadword_without_args_asks_instead_of_erroring(bot, make_context):
+    """Argumentsiz /addbadword endi xato qaytarmasligi, so'z so'rashi kerak."""
+    update = FakeUpdate(SUPERADMIN_ID, "/addbadword", chat_type="private")
+    ctx = make_context()
+    ctx.args = []
+
+    await bot.cmd_addbadword(update, ctx)
+
+    assert ctx.user_data.get("step") == "addbadword_waiting"
+    assert update.message.replies
+    assert "❌" not in update.message.replies[-1]
+
+
+@pytest.mark.asyncio
+async def test_addbadword_waiting_step_adds_word(bot, make_context):
+    """addbadword_waiting bosqichida yuborilgan keyingi xabar so'z
+    sifatida qo'shilishi kerak."""
+    update = FakeUpdate(SUPERADMIN_ID, "yomonsoz", chat_type="private")
+    ctx = make_context()
+    ctx.user_data["step"] = "addbadword_waiting"
+
+    await bot.handle_text(update, ctx)
+
+    bw = bot.load_badwords()
+    assert "yomonsoz" in bw["words"]
+    assert ctx.user_data.get("step") is None
 
