@@ -458,7 +458,7 @@ async def cmd_listtopics(update: Update, context: ContextTypes.DEFAULT_TYPE):
         mq    = get_admin_max_questions(cb if isinstance(cb, int) else uid)
         owner_s = f" (👤{cb})" if is_superadmin(uid) and cb != uid else ""
         lines.append(
-            f"{t['emoji']} *{t['name']}* — {len(t['questions'])}/{mq} "
+            f"{t['emoji']} *{mdesc(t['name'])}* — {len(t['questions'])}/{mq} "
             f"| sovrin:{prize} | 🔐{acc}{owner_s}")
     hdr = (f"📋 *Barcha topiclar ({len(topics)}/{MAX_TOPICS}):*"
            if is_superadmin(uid) else
@@ -1428,8 +1428,8 @@ async def check_profanity(update: Update, context: ContextTypes.DEFAULT_TYPE):
     has_normal = _has_badword(text, normal)
     if not has_severe and not has_normal:
         return
-    warn_msg = _random_warning(bw.get("warnings", []))
-    ulink    = f"[{user.first_name}](tg://user?id={user.id})"
+    warn_msg = mdesc(_random_warning(bw.get("warnings", [])))
+    ulink    = f"[{mdesc(user.first_name)}](tg://user?id={user.id})"
     try:
         bm = await context.bot.get_chat_member(chat.id, context.bot.id)
         bot_adm = bm.status in ("administrator", "creator")
@@ -1470,11 +1470,11 @@ async def check_profanity(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 SUPERADMIN,
                 f"🚨 *QOPOL SO'Z!*\n\n"
                 f"👤 {ulink} | `{user.id}`"
-                + (f" | @{user.username}" if user.username else "")
-                + f"\n💬 Guruh: *{chat.title}* (`{chat.id}`)\n"
+                + (f" | @{mdesc(user.username)}" if user.username else "")
+                + f"\n💬 Guruh: *{mdesc(chat.title)}* (`{chat.id}`)\n"
                   f"👮 User admin: {'✅' if usr_adm else '❌'}\n"
                   f"🦵 Kick: {'✅' if not usr_adm and bot_adm else '❌'}\n\n"
-                  f"📝 Xabar: `{text[:300]}`",
+                  f"📝 Xabar: `{mdesc(text[:300])}`",
                 parse_mode="Markdown")
         except Exception:
             pass
@@ -1628,7 +1628,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             lines = []
             for t in topics:
                 mq = get_admin_max_questions(t.get("created_by", uid))
-                lines.append(f"{t['emoji']} *{t['name']}* — {len(t['questions'])}/{mq}")
+                lines.append(f"{t['emoji']} *{mdesc(t['name'])}* — {len(t['questions'])}/{mq}")
             btns = [[IKB(f"{t['emoji']} {t['name']}", callback_data=f"topic_detail:{t['name']}")] for t in topics]
             btns.append([IKB("➕ Yangi topic", callback_data="menu:newtopic_prompt"),
                          IKB("⬅️ Orqaga",     callback_data="menu:back")])

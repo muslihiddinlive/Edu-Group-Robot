@@ -548,14 +548,14 @@ def format_user_info(user=None, uid: int = None) -> str:
     if user:
         fn   = user.first_name or "—"
         ln   = user.last_name  or "—"
-        uname = f"@{user.username}" if user.username else "—"
+        uname = f"@{mdesc(user.username)}" if user.username else "—"
         lang = getattr(user, "language_code", "—") or "—"
         is_bot = "✅" if getattr(user, "is_bot", False) else "❌"
         is_premium = "✅" if getattr(user, "is_premium", False) else "❌"
     elif u_data:
         fn   = u_data.get("first_name", "—")
         ln   = u_data.get("last_name",  "—")
-        uname = f"@{u_data['username']}" if u_data.get("username") else "—"
+        uname = f"@{mdesc(u_data['username'])}" if u_data.get("username") else "—"
         lang = u_data.get("language_code", "—") or "—"
         is_bot = "—"
         is_premium = "—"
@@ -573,8 +573,8 @@ def format_user_info(user=None, uid: int = None) -> str:
     return (
         f"👤 *Foydalanuvchi ma'lumotlari:*\n\n"
         f"🆔 ID: `{uid}`\n"
-        f"👤 Ism: *{fn}*\n"
-        f"👤 Familiya: *{ln}*\n"
+        f"👤 Ism: *{mdesc(fn)}*\n"
+        f"👤 Familiya: *{mdesc(ln)}*\n"
         f"📛 Username: {uname}\n"
         f"🌐 Til: `{lang}`\n"
         f"🤖 Bot: {is_bot}\n"
@@ -1261,8 +1261,8 @@ async def _finalize_addadmin(q, context: ContextTypes.DEFAULT_TYPE,
 async def _relay(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     hdr  = (f"📨 *Foydalanuvchidan:*\n"
-            f"👤 [{user.first_name}](tg://user?id={user.id}) | `{user.id}`"
-            + (f" | @{user.username}" if user.username else ""))
+            f"👤 [{mdesc(user.first_name)}](tg://user?id={user.id}) | `{user.id}`"
+            + (f" | @{mdesc(user.username)}" if user.username else ""))
     try:
         await context.bot.send_message(SUPERADMIN, hdr, parse_mode="Markdown")
         await context.bot.forward_message(
