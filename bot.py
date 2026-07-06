@@ -3055,6 +3055,7 @@ async def run_bot():
 
     logger.info("Zahiradan avtomatik tiklash...")
     await auto_restore_on_startup(app.bot)
+    await sync_bot_commands(app.bot)
 
     if not core.get_supergroup_id():
         try:

@@ -45,6 +45,9 @@ from telegram import (
     ReactionTypeEmoji,
     ReactionTypeCustomEmoji,
     ChatPermissions,
+    BotCommand,
+    BotCommandScopeDefault,
+    BotCommandScopeChat,
 )
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
@@ -311,7 +314,14 @@ def count_topics() -> int:
 
 # ── Admins, Chats, Config, Badwords ──
 def load_admins() -> dict:  return _jload(ADMINS_FILE)
-def save_admins(d: dict):   _jsave(ADMINS_FILE, d)
+def save_admins(d: dict):
+    _jsave(ADMINS_FILE, d)
+    if _BOT_REF is not None:
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(sync_bot_commands(_BOT_REF))
+        except RuntimeError:
+            pass  # event loop yo'q (masalan testda) — muammo emas
 def load_chats() -> dict:   return _jload(CHATS_FILE)
 def save_chats(d: dict):    _jsave(CHATS_FILE, d)
 def load_config() -> dict:  return _jload(CONFIG_FILE)
@@ -1065,6 +1075,86 @@ async def _process_restore(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📅 {data.get('export_date','?')}\n"
         f"👥 {ac} admin | 💬 {cc} chat | 📚 {tc} topic | 👤 {uc} user",
         parse_mode="Markdown")
+
+# ══════════════════════════════════════════════════════
+#  BOT COMMAND MENUS (auditoriyaga qarab har xil)
+# ══════════════════════════════════════════════════════
+PUBLIC_COMMANDS = [
+    ("start",   "Botni ishga tushirish"),
+    ("contact", "Superadminga murojaat qilish"),
+    ("cancel",  "Joriy amalni bekor qilish"),
+    ("newgame", "O'yin boshlash (standart/speed/langmode/admin)"),
+    ("endgame", "O'yinni tugatish"),
+    ("scores",  "O'yin natijalarini ko'rish"),
+    ("skip",    "Savolni o'tkazib yuborish"),
+]
+
+ADMIN_COMMANDS = PUBLIC_COMMANDS + [
+    ("newtopic",        "Yangi savol-javob topic yaratish"),
+    ("listtopics",      "Mavjud topiclar ro'yxati"),
+    ("deletetopic",     "Topicni o'chirish"),
+    ("setprize",        "Topic uchun sovrin belgilash"),
+    ("edittopicaccess", "Topic ruxsatini o'zgartirish"),
+    ("addq",            "Topicga savol qo'shish (bitta-bitta)"),
+    ("bulkq",           "Topicga savollarni ommaviy qo'shish"),
+    ("listgames",       "Faol o'yinlar ro'yxati"),
+    ("del",             "Xabarni o'chirish"),
+    ("done",            "Amalni yakunlash"),
+    ("addadmin",        "Yangi admin qo'shish"),
+    ("removeadmin",     "Adminni o'chirish"),
+    ("listadmins",      "Adminlar ro'yxati"),
+    ("editadmin",       "Admin ma'lumotini tahrirlash"),
+    ("setdisplayname",  "Ko'rinadigan ismni o'rnatish"),
+    ("sendas",          "Bot nomidan xabar yuborish"),
+    ("requireadmin",    "Guruhda faqat admin ishlatishini talab qilish"),
+    ("addbadword",      "Taqiqlangan so'z qo'shish"),
+    ("addsacredname",   "Diний shaxs nomini qo'shish"),
+    ("addsevereword",   "Og'ir taqiqlangan so'z qo'shish"),
+    ("addwarning",      "Ogohlantirish matnini qo'shish"),
+    ("listbadwords",    "Taqiqlangan so'zlar ro'yxati"),
+    ("removebadword",   "Taqiqlangan so'zni o'chirish"),
+    ("removewarning",   "Ogohlantirish matnini o'chirish"),
+    ("broadcast",       "Barcha userlarga xabar yuborish"),
+    ("export",          "Zaxira nusxa yaratish"),
+    ("restore",         "Zaxiradan tiklash"),
+    ("setprice",        "Tarif narxini o'rnatish"),
+    ("setchannel",      "Majburiy obuna kanalini o'rnatish"),
+    ("delmsgs",         "Foydalanuvchi xabarlarini o'chirish"),
+    ("delbotmsg",       "Bot xabarini o'chirish"),
+    ("togglereaction",  "Superadmin reaksiyasini yoqish/o'chirish"),
+    ("createtopic",     "Forum topic yaratish"),
+    ("setgroup",        "DB guruhni ulash/almashtirish"),
+    ("userinfo",        "Foydalanuvchi ma'lumotini ko'rish"),
+    ("listusers",       "Foydalanuvchilar ro'yxati"),
+]
+
+async def sync_bot_commands(bot, extra_uids=None) -> None:
+    """Oddiy foydalanuvchilarga qisqa, superadmin va bot-adminlarga
+    to'liq komandalar ro'yxatini ko'rsatadi (BotCommandScope orqali).
+    BotFather'dagi /setcommands FAQAT umumiy (default) ro'yxatga ta'sir
+    qiladi — bu funksiya uni ustidan chiqib, maxsus foydalanuvchilarga
+    boshqacha menyu ko'rsatadi."""
+    public_cmds = [BotCommand(c, d) for c, d in PUBLIC_COMMANDS]
+    admin_cmds  = [BotCommand(c, d) for c, d in ADMIN_COMMANDS]
+    try:
+        await bot.set_my_commands(public_cmds, scope=BotCommandScopeDefault())
+    except Exception as e:
+        logger.warning(f"sync_bot_commands (default): {e}")
+
+    targets = {SUPERADMIN}
+    for uid_s in load_admins().keys():
+        try:
+            targets.add(int(uid_s))
+        except (TypeError, ValueError):
+            pass
+    if extra_uids:
+        targets.update(extra_uids)
+
+    for uid in targets:
+        try:
+            await bot.set_my_commands(admin_cmds, scope=BotCommandScopeChat(chat_id=uid))
+        except Exception as e:
+            logger.debug(f"sync_bot_commands ({uid}): {e}")
 
 async def auto_restore_on_startup(bot) -> None:
     """Bot ishga tushganda (deploy/redeploy yoki restart — xotira tozalanganda)
