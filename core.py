@@ -554,6 +554,9 @@ def get_admin_max_questions(uid: int) -> int:
 def count_admin_topics(uid: int) -> int:
     return sum(1 for t in all_topics() if t.get("created_by") == uid)
 
+def get_user_topic_names(uid: int) -> list:
+    return [t["name"] for t in all_topics() if t.get("created_by") == uid]
+
 def count_sub_admins(admin_uid: int) -> int:
     return sum(1 for v in load_admins().values() if v.get("added_by") == admin_uid)
 
@@ -691,7 +694,9 @@ def format_user_info(user=None, uid: int = None) -> str:
 
     tarif = get_user_tarif(uid) if uid else "—"
     tarif_name = TARIF_NAMES.get(tarif, tarif)
-    topics_count = count_admin_topics(uid) if uid else "—"
+    topic_names  = get_user_topic_names(uid) if uid else []
+    topics_count = len(topic_names)
+    topics_line  = ", ".join(f"`{mdesc(n)}`" for n in topic_names) if topic_names else "—"
     ref_count = u_data.get("referral_count", 0) if u_data else "—"
     joined = u_data.get("joined_at", "—") if u_data else "—"
     ref_by = u_data.get("referral_by", "—") if u_data else "—"
@@ -700,6 +705,7 @@ def format_user_info(user=None, uid: int = None) -> str:
     return (
         f"👤 *Foydalanuvchi ma'lumotlari:*\n\n"
         f"🆔 ID: `{uid}`\n"
+        f"💬 Chat ID: `{uid}`\n"
         f"👤 Ism: *{mdesc(fn)}*\n"
         f"👤 Familiya: *{mdesc(ln)}*\n"
         f"📛 Username: {uname}\n"
@@ -708,7 +714,7 @@ def format_user_info(user=None, uid: int = None) -> str:
         f"⭐ Telegram Premium: {is_premium}\n"
         f"📅 Qo'shilgan: `{joined}`\n"
         f"💎 Tarif: *{tarif_name}*\n"
-        f"📁 Topiclar: {topics_count}\n"
+        f"📁 Topiclar ({topics_count}): {topics_line}\n"
         f"👥 Referallar: {ref_count}\n"
         f"🔗 Referral by: `{ref_by}`\n"
         f"📢 Obuna: {subscribed}"

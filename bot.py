@@ -1225,6 +1225,53 @@ async def cmd_createtopic(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.message.reply_text("❌ Topic yaratib bo'lmadi.")
 
+USERS_PER_PAGE = 8
+
+def _build_users_page(page: int):
+    """(matn, keyboard) qaytaradi — userlar sahifasi uchun. Userlar
+    bo'lmasa (None, None) qaytaradi."""
+    users = load_users()
+    if not users:
+        return None, None
+    uids  = sorted(users.keys(), key=lambda k: int(k))
+    total = len(uids)
+    start = page * USERS_PER_PAGE
+    if start >= total:
+        page, start = 0, 0
+    chunk = uids[start:start + USERS_PER_PAGE]
+
+    rows = []
+    for uid_s in chunk:
+        u     = users[uid_s]
+        name  = u.get("first_name") or "Anonim"
+        uname = f"@{u['username']}" if u.get("username") else uid_s
+        tarif = TARIF_NAMES.get(get_user_tarif(int(uid_s)), "")
+        rows.append([IKB(f"{name} ({uname}) — {tarif}",
+                          callback_data=f"user_detail:{uid_s}:{page}")])
+    nav = []
+    if page > 0:
+        nav.append(IKB("⬅️", callback_data=f"userslist:{page-1}"))
+    if start + USERS_PER_PAGE < total:
+        nav.append(IKB("➡️", callback_data=f"userslist:{page+1}"))
+    if nav:
+        rows.append(nav)
+    rows.append([IKB("⬅️ Orqaga", callback_data="menu:back")])
+
+    text = (f"👤 *Foydalanuvchilar ({total} ta)* — {page + 1}-sahifa\n\n"
+            "Biror userni tanlang:")
+    return text, InlineKeyboardMarkup(rows)
+
+async def _render_users_list(q, page: int):
+    """Userlarni sahifalab, har biriga bosilganda to'liq ma'lumot +
+    tarif/referral berish tugmalari chiqadigan ro'yxatni ko'rsatadi."""
+    text, kb = _build_users_page(page)
+    if text is None:
+        await q.edit_message_text(
+            "👤 Userlar yo'q.",
+            reply_markup=InlineKeyboardMarkup([[IKB("⬅️ Orqaga", callback_data="menu:back")]]))
+        return
+    await q.edit_message_text(text, parse_mode="Markdown", reply_markup=kb)
+
 async def cmd_userinfo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """User ma'lumotlari. /userinfo <uid>"""
     if not is_superadmin(update.effective_user.id):
@@ -1239,25 +1286,23 @@ async def cmd_userinfo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Raqam kiriting.")
         return
     text = format_user_info(uid=uid_t)
-    await update.message.reply_text(text, parse_mode="Markdown")
+    kb = InlineKeyboardMarkup([
+        [IKB("💎 Tarif berish", callback_data=f"grant_tarif:{uid_t}:0")],
+        [IKB("🎁 Referral berish", callback_data=f"grant_ref:{uid_t}:0")],
+    ])
+    await update.message.reply_text(text, parse_mode="Markdown", reply_markup=kb)
 
 async def cmd_listusers(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Barcha userlar ro'yxati."""
+    """Barcha foydalanuvchilar ro'yxati — har biri bosilsa to'liq
+    ma'lumot (username, chat ID, topiclari) + tarif/referral berish
+    tugmalari bilan."""
     if not is_superadmin(update.effective_user.id):
         return
-    users = load_users()
-    if not users:
+    text, kb = _build_users_page(0)
+    if text is None:
         await update.message.reply_text("👤 Userlar yo'q.")
         return
-    by_tarif = {}
-    for u in users.values():
-        t = u.get("tarif", TARIF_FREE)
-        by_tarif[t] = by_tarif.get(t, 0) + 1
-    lines = [f"• {TARIF_NAMES.get(t, t)}: {n} ta" for t, n in by_tarif.items()]
-    await update.message.reply_text(
-        f"👤 *Jami foydalanuvchilar: {len(users)} ta*\n\n" +
-        "\n".join(lines),
-        parse_mode="Markdown")
+    await update.message.reply_text(text, parse_mode="Markdown", reply_markup=kb)
 
 async def cmd_export(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_superadmin(update.effective_user.id):
@@ -1616,6 +1661,30 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"✅ `{target}` uchun premium/animatsion reaksiya (ID: `{cid}`) belgilandi.",
             parse_mode="Markdown")
+        return
+
+    if step == "grant_ref_waiting" and is_superadmin(uid):
+        context.user_data.pop("step", None)
+        target_uid = context.user_data.pop("gr_uid", None)
+        back_page  = context.user_data.pop("gr_back", 0)
+        try:
+            amount = int(text.strip())
+        except ValueError:
+            await update.message.reply_text("❌ Butun son kiriting (masalan `5` yoki `-3`).",
+                                            parse_mode="Markdown")
+            return
+        users = load_users()
+        u = users.setdefault(str(target_uid), {})
+        u["referral_count"] = max(0, u.get("referral_count", 0) + amount)
+        save_users(users)
+        verb = "qo'shildi" if amount >= 0 else "ayirildi"
+        await update.message.reply_text(
+            f"✅ `{target_uid}` uchun {abs(amount)} ta referral {verb}! "
+            f"(Jami: {u['referral_count']})",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(
+                [[IKB("⬅️ Foydalanuvchiga qaytish",
+                       callback_data=f"user_detail:{target_uid}:{back_page}")]]))
         return
 
     if step == "addbadword_waiting" and is_superadmin(uid):
@@ -2044,6 +2113,86 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid  = q.from_user.id
     data = q.data
 
+    # ── Userlar ro'yxati / tafsiloti / tarif-referral berish ──
+    if data.startswith("userslist:"):
+        if not is_superadmin(uid): return
+        await _render_users_list(q, int(data.split(":")[1]))
+        return
+
+    if data.startswith("user_detail:"):
+        if not is_superadmin(uid): return
+        parts = data.split(":")
+        target_uid = int(parts[1])
+        back_page  = int(parts[2]) if len(parts) > 2 else 0
+        text = format_user_info(uid=target_uid)
+        kb = InlineKeyboardMarkup([
+            [IKB("💎 Tarif berish", callback_data=f"grant_tarif:{target_uid}:{back_page}")],
+            [IKB("🎁 Referral berish", callback_data=f"grant_ref:{target_uid}:{back_page}")],
+            [IKB("⬅️ Orqaga", callback_data=f"userslist:{back_page}")],
+        ])
+        await q.edit_message_text(text, parse_mode="Markdown", reply_markup=kb)
+        return
+
+    if data.startswith("grant_tarif:"):
+        if not is_superadmin(uid): return
+        _, target_uid, back_page = data.split(":")
+        kb = InlineKeyboardMarkup(
+            [[IKB(TARIF_NAMES[t], callback_data=f"gt:{target_uid}:{t}:{back_page}")]
+             for t in (TARIF_FREE, TARIF_PLUS, TARIF_PREMIUM, TARIF_VIP)]
+            + [[IKB("⬅️ Orqaga", callback_data=f"user_detail:{target_uid}:{back_page}")]])
+        await q.edit_message_text("💎 Qaysi tarifni berasiz?", reply_markup=kb)
+        return
+
+    if data.startswith("gt:"):
+        if not is_superadmin(uid): return
+        _, target_uid, tarif, back_page = data.split(":")
+        kb = InlineKeyboardMarkup([
+            [IKB("7 kun",  callback_data=f"gtd:{target_uid}:{tarif}:7:{back_page}"),
+             IKB("30 kun", callback_data=f"gtd:{target_uid}:{tarif}:30:{back_page}")],
+            [IKB("♾ Doimiy", callback_data=f"gtd:{target_uid}:{tarif}:0:{back_page}")],
+            [IKB("⬅️ Orqaga", callback_data=f"grant_tarif:{target_uid}:{back_page}")],
+        ])
+        await q.edit_message_text(
+            f"💎 *{TARIF_NAMES[tarif]}* — qancha muddatga?",
+            parse_mode="Markdown", reply_markup=kb)
+        return
+
+    if data.startswith("gtd:"):
+        if not is_superadmin(uid): return
+        _, target_uid_s, tarif, days_s, back_page = data.split(":")
+        target_uid = int(target_uid_s)
+        days = int(days_s)
+        users = load_users()
+        u = users.setdefault(target_uid_s, {})
+        u["tarif"] = tarif
+        u["tarif_expires"] = (
+            (datetime.now(TZ) + timedelta(days=days)).isoformat() if days > 0 else None)
+        save_users(users)
+        dur = f"{days} kunga" if days > 0 else "doimiy"
+        await q.edit_message_text(
+            f"✅ `{target_uid}` ga *{TARIF_NAMES[tarif]}* ({dur}) berildi!",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(
+                [[IKB("⬅️ Orqaga", callback_data=f"user_detail:{target_uid}:{back_page}")]]))
+        try:
+            await context.bot.send_message(
+                target_uid, f"🎉 Sizga *{TARIF_NAMES[tarif]}* tarifi berildi!",
+                parse_mode="Markdown")
+        except Exception:
+            pass
+        return
+
+    if data.startswith("grant_ref:"):
+        if not is_superadmin(uid): return
+        _, target_uid, back_page = data.split(":")
+        context.user_data.clear()
+        context.user_data.update({"step": "grant_ref_waiting",
+                                    "gr_uid": int(target_uid), "gr_back": int(back_page)})
+        await q.edit_message_text(
+            "🎁 Nechta referral qo'shmoqchisiz? Raqam yuboring (masalan `5`, ayirish uchun `-3`):",
+            parse_mode="Markdown")
+        return
+
     # ── So'kinish hodisasi tafsiloti ──
     if data.startswith("profview:"):
         iid = int(data.split(":", 1)[1])
@@ -2104,6 +2253,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await q.edit_message_text(
                     f"📊 Topic: {owned}/{lim} | Savol/topic: {mq}",
                     reply_markup=_admin_main_kb(uid))
+            return
+
+        if section == "users":
+            if not is_superadmin(uid):
+                return
+            await _render_users_list(q, 0)
             return
 
         if section == "topics":
