@@ -44,6 +44,7 @@ from telegram import (
     LabeledPrice,
     ReactionTypeEmoji,
     ReactionTypeCustomEmoji,
+    ChatPermissions,
 )
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
@@ -159,6 +160,7 @@ CHATS_FILE     = "chats.json"
 CONFIG_FILE    = "config.json"
 BADWORDS_FILE  = "badwords.json"
 USERS_FILE     = "users.json"
+INCIDENTS_FILE = "incidents.json"
 MAX_MSG_HISTORY = 10000
 EXPORT_VERSION  = 5
 BROADCAST_READY = "✅ Tayyor — Yuborishni boshlash"
@@ -320,9 +322,43 @@ def load_badwords() -> dict:
     d.setdefault("words", [])
     d.setdefault("severe_words", [])
     d.setdefault("warnings", [])
+    d.setdefault("sacred_names", ["muhammad", "muxammad", "muslihiddin",
+                                   "ali", "holid", "xolid"])
     return d
 
 def save_badwords(d: dict): _jsave(BADWORDS_FILE, d)
+
+def load_incidents() -> list:
+    d = _jload(INCIDENTS_FILE)
+    return d.get("items", []) if isinstance(d, dict) else []
+
+def save_incidents(items: list):
+    _jsave(INCIDENTS_FILE, {"items": items[-2000:]})
+
+def record_incident(chat, offender, target_name: str, text: str,
+                     consequence: str, admin: bool, sacred: bool) -> int:
+    """So'kinish hodisasini log qiladi va incident_id qaytaradi."""
+    items = load_incidents()
+    iid   = (items[-1]["id"] + 1) if items else 1
+    items.append({
+        "id": iid,
+        "time": datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S"),
+        "chat_id": chat.id, "chat_title": chat.title or str(chat.id),
+        "offender_id": offender.id, "offender_name": offender.first_name or "Anonim",
+        "offender_username": offender.username or "",
+        "target": target_name,
+        "text": text[:500],
+        "consequence": consequence,
+        "was_admin": admin, "sacred_name": sacred,
+    })
+    save_incidents(items)
+    return iid
+
+def get_incident(iid: int):
+    for it in load_incidents():
+        if it["id"] == iid:
+            return it
+    return None
 
 # ── Users ──
 def load_users() -> dict:
@@ -676,11 +712,26 @@ games: dict = {}
 def get_game(chat_id: int) -> dict:
     if chat_id not in games:
         games[chat_id] = {
-            "active": False, "topic": None, "emoji": "",
-            "questions": [], "asked": 0, "current": None,
+            "active": False, "mode": "standard", "topic": None, "emoji": "",
+            "questions": [], "asked": 0, "current": None, "current_reversed": False,
             "current_msg_id": None, "scores": {}, "waiting": False,
+            "time_limit": None,
+            # Admin (module 1) uchun:
+            "admin_ranks": [], "started_by": None,
         }
     return games[chat_id]
+
+def parse_duration(s: str):
+    """'30s', '5d', '2soat', '1kun', '3k' -> soniyalarga o'giradi.
+    s=soniya, d=daqiqa, soat=soat, kun/k=kun."""
+    s = s.strip().lower()
+    m = re.match(r"^(\d+)\s*(s|soniya|d|daqiqa|soat|kun|k)$", s)
+    if not m:
+        return None
+    n, unit = int(m.group(1)), m.group(2)
+    mult = {"s": 1, "soniya": 1, "d": 60, "daqiqa": 60,
+             "soat": 3600, "kun": 86400, "k": 86400}[unit]
+    return n * mult
 
 # ══════════════════════════════════════════════════════
 #  MESSAGE HISTORY
@@ -923,6 +974,7 @@ async def do_export(bot, to_backup_topic: bool = True) -> bool:
         "chats":     load_chats(),
         "config":    load_config(),
         "badwords":  load_badwords(),
+        "incidents": load_incidents(),
         "users":     load_users(),
         "topics":    topics,
     }
@@ -981,7 +1033,8 @@ async def apply_restore_data(data: dict) -> tuple[int, int, int, int]:
         if "admins"   in data: save_admins(data["admins"]);     ac = len(data["admins"])
         if "chats"    in data: save_chats(data["chats"]);       cc = len(data["chats"])
         if "config"   in data: save_config(data["config"])
-        if "badwords" in data: save_badwords(data["badwords"])
+        if "badwords"  in data: save_badwords(data["badwords"])
+        if "incidents" in data: save_incidents(data["incidents"])
         if "users"    in data: save_users(data["users"]);       uc = len(data["users"])
         for t in data.get("topics", []):
             if "name" in t: save_topic(t); tc += 1
@@ -1206,18 +1259,28 @@ async def send_question(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
     q = g["questions"][g["asked"]]
     g["asked"] += 1
     g["current"] = q
+
+    # Lang mode: tasodifiy savol/javob tomonini almashtiradi
+    reversed_ = False
+    if g.get("mode") == "lang":
+        reversed_ = random.random() < 0.5
+    g["current_reversed"] = reversed_
+
+    prompt = q["answer"] if reversed_ else q["question"]
     cap = (f"{g['emoji']} *Savol {g['asked']}/{len(g['questions'])}*\n\n"
-           f"❓ {mdesc(q['question'])}\n\n↩️ Reply qilib javob bering:")
+           f"❓ {mdesc(prompt)}\n\n↩️ Reply qilib javob bering:")
     mt = q.get("media_type", "none")
     fi = q.get("file_id")
     try:
-        if mt == "photo" and fi:
+        # Reversed holatda rasm/video asl savolga tegishli bo'lgani uchun,
+        # faqat oddiy (reversed bo'lmagan) holatda media biriktiramiz
+        if mt == "photo" and fi and not reversed_:
             sent = await context.bot.send_photo(chat_id, fi, caption=cap, parse_mode="Markdown")
-        elif mt == "video" and fi:
+        elif mt == "video" and fi and not reversed_:
             sent = await context.bot.send_video(chat_id, fi, caption=cap, parse_mode="Markdown")
-        elif mt == "gif" and fi:
+        elif mt == "gif" and fi and not reversed_:
             sent = await context.bot.send_animation(chat_id, fi, caption=cap, parse_mode="Markdown")
-        elif mt == "sticker" and fi:
+        elif mt == "sticker" and fi and not reversed_:
             await context.bot.send_sticker(chat_id, fi)
             sent = await context.bot.send_message(chat_id, cap, parse_mode="Markdown")
         else:
@@ -1225,12 +1288,46 @@ async def send_question(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
         g["current_msg_id"] = sent.message_id
     except Exception as e:
         logger.error(f"send_question: {e}")
+        return
+
+    # Speed mode: vaqt limiti bo'lsa, taymer ishga tushiramiz
+    if g.get("mode") == "speed" and g.get("time_limit"):
+        asyncio.create_task(_speed_timeout(chat_id, context, q))
+
+async def _speed_timeout(chat_id: int, context: ContextTypes.DEFAULT_TYPE, question_ref):
+    """Speed mode uchun vaqt limiti tugaganda ishga tushadi. Agar shu
+    orada javob berilgan yoki o'yin tugagan bo'lsa, hech narsa qilmaydi."""
+    g = get_game(chat_id)
+    try:
+        await asyncio.sleep(g["time_limit"])
+    except Exception:
+        return
+    if not g["active"] or g["current"] is not question_ref or g["waiting"]:
+        return
+    g["waiting"] = True
+    correct = g["current"]["answer"]
+    alts    = g["current"].get("alternatives", [])
+    alt_t   = f"\n➕ Shuningdek: _{mdesc(', '.join(alts))}_" if alts else ""
+    try:
+        await context.bot.send_message(
+            chat_id,
+            f"⏰ *VAQT TUGADI!*\n✅ To'g'ri: *{mdesc(correct)}*{alt_t}\n\n⏩ Keyingi...",
+            parse_mode="Markdown")
+    except Exception:
+        pass
+    g["waiting"] = False
+    if g["asked"] >= len(g["questions"]):
+        await finish_game(chat_id, context)
+    else:
+        await send_question(chat_id, context)
 
 async def _check_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cid = update.effective_chat.id
     g   = get_game(cid)
     if not g["active"] or g["current"] is None or g["waiting"]:
         return
+    if g.get("mode") == "admin":
+        return  # admin mode savol-javob bilan ishlamaydi
     reply = update.message.reply_to_message
     if reply is None or reply.message_id != g["current_msg_id"]:
         return
@@ -1239,11 +1336,20 @@ async def _check_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
     raw_nm  = user.first_name or "Anonim"
     dname   = mdesc(get_display_name(user.id, raw_nm))
     ans     = update.message.text.strip().lower()
-    correct = g["current"]["answer"].lower()
-    alts    = [a.lower() for a in g["current"].get("alternatives", [])]
-    ok      = (ans == correct or ans in alts)
-    g["waiting"] = True
+
+    if g.get("mode") == "lang" and g.get("current_reversed"):
+        # Reversed holatda javob — asl so'zning o'zi
+        correct = g["current"]["question"].lower()
+        alts    = []
+    else:
+        correct = g["current"]["answer"].lower()
+        alts    = [a.lower() for a in g["current"].get("alternatives", [])]
+    ok = (ans == correct or ans in alts)
+
+    mode = g.get("mode", "standard")
+
     if ok:
+        g["waiting"] = True
         if uid_s not in g["scores"]:
             g["scores"][uid_s] = {"name": raw_nm, "count": 0}
         g["scores"][uid_s]["count"] += 1
@@ -1251,16 +1357,30 @@ async def _check_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"✅ *TO'G'RI!* 🎉\n👤 {dname}: {ball} ball\n\n⏩ Keyingi...",
             parse_mode="Markdown")
-    else:
+        g["waiting"] = False
+        if g["asked"] >= len(g["questions"]):
+            await finish_game(cid, context)
+        else:
+            await send_question(cid, context)
+        return
+
+    # Noto'g'ri javob
+    if mode == "speed":
+        g["waiting"] = True
         alt_t = f"\n➕ Shuningdek: _{mdesc(', '.join(alts))}_" if alts else ""
         await update.message.reply_text(
             f"❌ *XATO!*\n✅ To'g'ri: *{mdesc(correct)}*{alt_t}\n\n⏩ Keyingi...",
             parse_mode="Markdown")
-    g["waiting"] = False
-    if g["asked"] >= len(g["questions"]):
-        await finish_game(cid, context)
+        g["waiting"] = False
+        if g["asked"] >= len(g["questions"]):
+            await finish_game(cid, context)
+        else:
+            await send_question(cid, context)
     else:
-        await send_question(cid, context)
+        # Standard / Lang: to'g'ri javob aytilmaydi, xuddi shu savol
+        # kutishda davom etadi (keyingisiga o'tmaydi)
+        await update.message.reply_text(
+            "❌ *Noto'g'ri!* Yana urinib ko'ring 🔁", parse_mode="Markdown")
 
 async def finish_game(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
     g = get_game(chat_id)
@@ -1300,6 +1420,118 @@ async def finish_game(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
         logger.error(f"finish_game: {e}")
         await context.bot.send_message(chat_id, res, parse_mode="Markdown")
     g["scores"] = {}
+
+# ══════════════════════════════════════════════════════
+#  MODULE 1 — ADMIN O'YINI (✅ orqali qo'lda g'olib belgilash)
+# ══════════════════════════════════════════════════════
+
+def _find_user_by_username(uname: str):
+    """users.json ichidan @username bo'yicha qidiradi.
+    Topilsa (uid, name, username) qaytaradi, aks holda None."""
+    uname = uname.lstrip("@").lower()
+    for uid_s, data in load_users().items():
+        if (data.get("username") or "").lower() == uname:
+            return int(uid_s), data.get("first_name") or "Anonim", data.get("username")
+    return None
+
+async def handle_admin_mode_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Admin-mode o'yinida ✅ orqali g'olib belgilashni qayta ishlaydi.
+    True qaytarsa — xabar shu yerda to'liq qayta ishlangan (davom
+    ettirish shart emas)."""
+    msg  = update.message
+    chat = update.effective_chat
+    if not msg or not msg.text or not chat or chat.type not in ("group", "supergroup"):
+        return False
+    g = get_game(chat.id)
+    if not g["active"] or g.get("mode") != "admin":
+        return False
+    text = msg.text.strip()
+    if not text.startswith("✅"):
+        return False
+    user = update.effective_user
+    if not user:
+        return False
+    is_allowed = (user.id == SUPERADMIN or is_bot_admin(user.id)
+                  or await is_group_admin(update, context))
+    if not is_allowed:
+        return False  # oddiy ishtirokchi ✅ yozsa — bu oddiy matn, e'tiborsiz qoldiramiz
+
+    winner_uid = winner_name = winner_username = None
+    target_msg_id = None
+
+    reply = msg.reply_to_message
+    if reply and reply.from_user:
+        winner_uid      = reply.from_user.id
+        winner_name     = reply.from_user.first_name or "Anonim"
+        winner_username = reply.from_user.username
+        target_msg_id   = reply.message_id
+    else:
+        m = re.search(r"@(\w+)", text)
+        if m:
+            found = _find_user_by_username(m.group(1))
+            if found:
+                winner_uid, winner_name, winner_username = found
+
+    if winner_uid is None:
+        await msg.reply_text(
+            "❗️ Iltimos, biror xabarga *javob* tariqasida yuboring yoki "
+            "`✅ @username` shaklida yozing.", parse_mode="Markdown")
+        return True
+
+    if any(r["uid"] == winner_uid for r in g["admin_ranks"]):
+        await msg.reply_text("⚠️ Bu kishi allaqachon belgilangan!")
+        return True
+
+    pos = len(g["admin_ranks"]) + 1
+    g["admin_ranks"].append({"uid": winner_uid, "name": winner_name,
+                              "username": winner_username})
+    dname = mdesc(get_display_name(winner_uid, winner_name))
+    await context.bot.send_message(
+        chat.id, f"🎉 Tabriklaymiz, {dname}! Siz *{pos}*-o'rinni egalladingiz!",
+        parse_mode="Markdown")
+    if target_msg_id:
+        try:
+            await context.bot.set_message_reaction(
+                chat_id=chat.id, message_id=target_msg_id,
+                reaction=[ReactionTypeEmoji(emoji="🎉")], is_big=False)
+        except Exception:
+            pass  # reaksiya bosilmasa ham o'yin to'xtab qolmasin
+    return True
+
+async def _finish_admin_game(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
+    """Admin o'yinini yakunlaydi — natijalarni guruh biriktirilgan
+    (linked) kanalga, aks holda guruhning o'ziga yuboradi."""
+    g = get_game(chat_id)
+    g["active"] = False
+    ranks = g.get("admin_ranks", [])
+    if not ranks:
+        await context.bot.send_message(chat_id, "📊 O'yin tugadi. Hech kim belgilanmadi.")
+        return
+    medals = ["🥇", "🥈", "🥉"]
+    lines  = ["🏆 *NATIJALAR* 🏆\n"]
+    for i, r in enumerate(ranks):
+        m     = medals[i] if i < 3 else f"{i+1}."
+        dname = mdesc(get_display_name(r["uid"], r["name"]))
+        uname = f" (@{mdesc(r['username'])})" if r.get("username") else ""
+        lines.append(f"{m} {dname}{uname} — {i+1}-o'rin 🎉")
+    text   = "\n".join(lines)
+    target = chat_id
+    try:
+        chat_obj = await context.bot.get_chat(chat_id)
+        if getattr(chat_obj, "linked_chat_id", None):
+            target = chat_obj.linked_chat_id
+    except Exception as e:
+        logger.warning(f"_finish_admin_game: get_chat xato: {e}")
+    try:
+        await context.bot.send_message(target, text, parse_mode="Markdown")
+    except Exception as e:
+        logger.warning(f"_finish_admin_game: natija yuborilmadi ({target}): {e}")
+        if target != chat_id:
+            try:
+                await context.bot.send_message(chat_id, text, parse_mode="Markdown")
+            except Exception:
+                pass
+    g["admin_ranks"] = []
 
 # ══════════════════════════════════════════════════════
 #  ADDADMIN FINALIZE

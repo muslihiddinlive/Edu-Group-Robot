@@ -543,13 +543,38 @@ async def cmd_newgame(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     if not args:
         topics = all_topics()
-        if not topics:
-            await update.message.reply_text("❌ Topic yo'q.")
-            return
-        names = ", ".join(f"`{t['name']}`" for t in topics)
+        names = ", ".join(f"`{t['name']}`" for t in topics) if topics else "(yo'q)"
         await update.message.reply_text(
-            f"❌ `/newgame english`\n\n📚 Mavjud: {names}", parse_mode="Markdown")
+            "❌ Foydalanish:\n"
+            "`/newgame <topic>` — standart\n"
+            "`/newgame <topic> langmode` — tarjima o'yini\n"
+            "`/newgame <topic> speed [vaqt]` — tezkor (masalan `30s`)\n"
+            "`/newgame admin` — admin belgilaydigan o'yin\n\n"
+            f"📚 Mavjud topiclar: {names}", parse_mode="Markdown")
         return
+
+    cid = chat.id
+    g   = get_game(cid)
+    if g["active"]:
+        label = "admin o'yini" if g["mode"] == "admin" else f"{g['emoji']}{g['topic']}"
+        await update.message.reply_text(
+            f"⚠️ Allaqachon *{label}* ketmoqda!", parse_mode="Markdown")
+        return
+
+    # ── Module 1: Admin mode ──
+    if args[0].lower() == "admin":
+        g.update({"active": True, "mode": "admin", "topic": None, "emoji": "",
+                  "questions": [], "asked": 0, "current": None,
+                  "current_msg_id": None, "scores": {}, "waiting": False,
+                  "time_limit": None, "admin_ranks": [],
+                  "started_by": update.effective_user.id})
+        await update.message.reply_text(
+            "🎮 *ADMIN O'YINI BOSHLANDI!*\n\n"
+            "✅ ni biror xabarga *javob* tariqasida yuboring (yoki "
+            "`✅ @username`) — o'sha kishi keyingi o'ringa yoziladi.\n\n"
+            "⏹ Tugatish: `/endgame`", parse_mode="Markdown")
+        return
+
     tn = args[0].lower()
     t  = load_topic(tn)
     if not t:
@@ -558,29 +583,48 @@ async def cmd_newgame(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not t["questions"]:
         await update.message.reply_text("❌ Bu topicda savollar yo'q!")
         return
-    cid = chat.id
-    g   = get_game(cid)
-    if g["active"]:
-        await update.message.reply_text(
-            f"⚠️ Allaqachon *{g['emoji']}{g['topic']}* ketmoqda!",
-            parse_mode="Markdown")
-        return
+
+    mode       = "standard"
+    time_limit = None
+    if len(args) >= 2:
+        m2 = args[1].lower()
+        if m2 == "langmode":
+            mode = "lang"
+        elif m2 == "speed":
+            mode = "speed"
+            if len(args) >= 3:
+                time_limit = parse_duration(args[2])
+                if time_limit is None:
+                    await update.message.reply_text(
+                        "❌ Vaqt formati noto'g'ri! Masalan: `30s`, `5d`, `2soat`, `1kun`",
+                        parse_mode="Markdown")
+                    return
+        else:
+            await update.message.reply_text(
+                "❌ Noma'lum rejim! `langmode` yoki `speed` bo'lishi kerak.")
+            return
+
     qs = t["questions"].copy()
     random.shuffle(qs)
-    g.update({"active": True, "topic": tn, "emoji": t["emoji"],
-              "questions": qs, "asked": 0, "current": None,
-              "current_msg_id": None, "scores": {}, "waiting": False})
+    g.update({"active": True, "mode": mode, "topic": tn, "emoji": t["emoji"],
+              "questions": qs, "asked": 0, "current": None, "current_reversed": False,
+              "current_msg_id": None, "scores": {}, "waiting": False,
+              "time_limit": time_limit, "admin_ranks": [],
+              "started_by": update.effective_user.id})
+    mode_label = {"standard": "", "lang": " 🔤 Lang mode",
+                  "speed": f" ⚡ Speed mode" + (f" ({args[2]})" if time_limit else "")}[mode]
     await update.message.reply_text(
-        f"🎮 *O'YIN BOSHLANDI!*\n\n{t['emoji']} *{tn.capitalize()}*\n"
+        f"🎮 *O'YIN BOSHLANDI!*{mode_label}\n\n{t['emoji']} *{tn.capitalize()}*\n"
         f"📊 {len(qs)} ta savol\n\n🎯 Reply qilib javob bering!",
         parse_mode="Markdown")
     await send_question(cid, context)
 
 async def cmd_endgame(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    cid = update.effective_chat.id
-    uid = update.effective_user.id
+    cid  = update.effective_chat.id
+    uid  = update.effective_user.id
+    chat = update.effective_chat
     if not is_superadmin(uid):
-        if update.effective_chat.type not in ("group", "supergroup"):
+        if chat.type not in ("group", "supergroup"):
             return
         if not await is_group_admin(update, context):
             await update.message.reply_text("❌ Faqat admin!")
@@ -589,6 +633,11 @@ async def cmd_endgame(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not g["active"]:
         await update.message.reply_text("⚠️ Faol o'yin yo'q.")
         return
+
+    if g.get("mode") == "admin":
+        await _finish_admin_game(cid, context)
+        return
+
     g["active"] = False
     g["current"] = None
     g["waiting"] = False
@@ -746,6 +795,241 @@ async def cmd_setchannel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"✅ Obuna kanali: `{cid}`", parse_mode="Markdown")
 
+DOT_COMMANDS = {"ban", "unban", "mute", "unmute", "kick", "warn", "unwarn",
+                "pin", "unpin", "promote", "demote", "purge", "del"}
+
+async def _can_use_dot_commands(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    uid = update.effective_user.id if update.effective_user else None
+    if uid is None:
+        return False
+    if uid == SUPERADMIN or is_bot_admin(uid):
+        return True
+    return await is_group_admin(update, context)
+
+async def handle_dot_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """'.' bilan boshlanadigan himoyachi-bot uslubidagi komandalar
+    (.ban .mute .warn .pin .del va h.k.). True qaytarsa — xabar shu
+    yerda to'liq qayta ishlangan."""
+    msg  = update.message
+    chat = update.effective_chat
+    if not msg or not msg.text or not chat or chat.type not in ("group", "supergroup"):
+        return False
+    text = msg.text.strip()
+    if not text.startswith("."):
+        return False
+    parts = text[1:].split()
+    if not parts:
+        return False
+    cmd  = parts[0].lower()
+    rest = parts[1:]
+    if cmd not in DOT_COMMANDS:
+        return False
+    if not await _can_use_dot_commands(update, context):
+        return False  # admin komandasi emasday, oddiy matn sifatida o'tkazib yuboramiz
+
+    reply = msg.reply_to_message
+
+    if cmd == "ban":
+        if not reply:
+            await msg.reply_text("❗️ Foydalanuvchi xabariga javob tariqasida yozing."); return True
+        try:
+            await context.bot.ban_chat_member(chat.id, reply.from_user.id)
+            await msg.reply_text(f"🚫 {mdesc(reply.from_user.first_name)} banned.", parse_mode="Markdown")
+        except Exception as e:
+            await msg.reply_text(f"❌ Xatolik: {e}")
+        return True
+
+    if cmd == "unban":
+        target_uid = reply.from_user.id if reply else None
+        if target_uid is None and rest:
+            found = _find_user_by_username(rest[0])
+            if found:
+                target_uid = found[0]
+        if target_uid is None:
+            await msg.reply_text("❗️ Javob bering yoki `@username` yozing.", parse_mode="Markdown")
+            return True
+        try:
+            await context.bot.unban_chat_member(chat.id, target_uid, only_if_banned=True)
+            await msg.reply_text("✅ Unban qilindi.")
+        except Exception as e:
+            await msg.reply_text(f"❌ Xatolik: {e}")
+        return True
+
+    if cmd == "kick":
+        if not reply:
+            await msg.reply_text("❗️ Foydalanuvchi xabariga javob tariqasida yozing."); return True
+        try:
+            await context.bot.ban_chat_member(chat.id, reply.from_user.id)
+            await asyncio.sleep(0.3)
+            await context.bot.unban_chat_member(chat.id, reply.from_user.id)
+            await msg.reply_text(f"🦵 {mdesc(reply.from_user.first_name)} chiqarib yuborildi.", parse_mode="Markdown")
+        except Exception as e:
+            await msg.reply_text(f"❌ Xatolik: {e}")
+        return True
+
+    if cmd == "mute":
+        if not reply:
+            await msg.reply_text("❗️ Foydalanuvchi xabariga javob tariqasida yozing."); return True
+        until = None
+        dur_label = "doimiy"
+        if rest:
+            secs = parse_duration(rest[0])
+            if secs:
+                until = datetime.now(TZ) + timedelta(seconds=secs)
+                dur_label = rest[0]
+        try:
+            perms  = ChatPermissions(can_send_messages=False)
+            kwargs = {"until_date": until} if until else {}
+            await context.bot.restrict_chat_member(chat.id, reply.from_user.id,
+                                                     permissions=perms, **kwargs)
+            await msg.reply_text(
+                f"🔇 {mdesc(reply.from_user.first_name)} mute qilindi ({dur_label}).",
+                parse_mode="Markdown")
+        except Exception as e:
+            await msg.reply_text(f"❌ Xatolik: {e}")
+        return True
+
+    if cmd == "unmute":
+        if not reply:
+            await msg.reply_text("❗️ Foydalanuvchi xabariga javob tariqasida yozing."); return True
+        try:
+            perms = ChatPermissions(can_send_messages=True, can_send_photos=True,
+                                     can_send_videos=True, can_send_other_messages=True,
+                                     can_add_web_page_previews=True)
+            await context.bot.restrict_chat_member(chat.id, reply.from_user.id, permissions=perms)
+            await msg.reply_text(f"🔊 {mdesc(reply.from_user.first_name)} unmute qilindi.", parse_mode="Markdown")
+        except Exception as e:
+            await msg.reply_text(f"❌ Xatolik: {e}")
+        return True
+
+    if cmd in ("warn", "unwarn"):
+        if not reply:
+            await msg.reply_text("❗️ Foydalanuvchi xabariga javob tariqasida yozing."); return True
+        warns = get_group_setting(chat.id, "warnings", {})
+        uid_s = str(reply.from_user.id)
+        cur   = warns.get(uid_s, 0)
+        cur   = cur + 1 if cmd == "warn" else max(0, cur - 1)
+        warns[uid_s] = cur
+        set_group_setting(chat.id, "warnings", warns)
+        await msg.reply_text(
+            f"⚠️ {mdesc(reply.from_user.first_name)}: {cur}/3 ta ogohlantirish.",
+            parse_mode="Markdown")
+        if cmd == "warn" and cur >= 3:
+            try:
+                await context.bot.ban_chat_member(chat.id, reply.from_user.id)
+                await asyncio.sleep(0.3)
+                await context.bot.unban_chat_member(chat.id, reply.from_user.id)
+                warns[uid_s] = 0
+                set_group_setting(chat.id, "warnings", warns)
+                await context.bot.send_message(
+                    chat.id, "🚫 3 ta ogohlantirishdan so'ng chiqarib yuborildi.")
+            except Exception:
+                pass
+        return True
+
+    if cmd == "pin":
+        if not reply:
+            await msg.reply_text("❗️ Xabarga javob tariqasida yozing."); return True
+        try:
+            await context.bot.pin_chat_message(chat.id, reply.message_id)
+            await msg.reply_text("📌 Pin qilindi.")
+        except Exception as e:
+            await msg.reply_text(f"❌ Xatolik: {e}")
+        return True
+
+    if cmd == "unpin":
+        try:
+            if reply:
+                await context.bot.unpin_chat_message(chat.id, reply.message_id)
+            else:
+                await context.bot.unpin_all_chat_messages(chat.id)
+            await msg.reply_text("📌 Unpin qilindi.")
+        except Exception as e:
+            await msg.reply_text(f"❌ Xatolik: {e}")
+        return True
+
+    if cmd in ("promote", "demote"):
+        if not reply:
+            await msg.reply_text("❗️ Foydalanuvchi xabariga javob tariqasida yozing."); return True
+        try:
+            grant = (cmd == "promote")
+            await context.bot.promote_chat_member(
+                chat.id, reply.from_user.id,
+                can_delete_messages=grant, can_restrict_members=grant,
+                can_pin_messages=grant, can_invite_users=grant)
+            verb = "admin qilindi" if grant else "admindan olindi"
+            await msg.reply_text(f"👮 {mdesc(reply.from_user.first_name)} {verb}.", parse_mode="Markdown")
+        except Exception as e:
+            await msg.reply_text(f"❌ Xatolik: {e}")
+        return True
+
+    if cmd == "purge":
+        if not reply:
+            await msg.reply_text("❗️ Boshlanish xabariga javob tariqasida yozing."); return True
+        ids = list(range(reply.message_id, msg.message_id + 1))
+        d, f = await _del_batch(context, chat.id, ids)
+        del_set = set(ids)
+        if chat.id in msg_history:
+            msg_history[chat.id] = [m for m in msg_history[chat.id] if m["id"] not in del_set]
+        try:
+            await context.bot.send_message(chat.id, f"🧹 {d} ta xabar o'chirildi.")
+        except Exception:
+            pass
+        return True
+
+    if cmd == "del":
+        # ".del @ a" — bot kuzatgan BUTUN tarixni tozalash
+        if len(rest) >= 2 and rest[0] == "@" and rest[1].lower() == "a":
+            hist = msg_history.get(chat.id, []).copy()
+            ids  = [m["id"] for m in hist]
+            d, f = await _del_batch(context, chat.id, ids)
+            msg_history[chat.id] = []
+            try:
+                await msg.delete()
+            except Exception:
+                pass
+            try:
+                await context.bot.send_message(chat.id, f"🧹 Butun tarix tozalandi: {d} ta xabar.")
+            except Exception:
+                pass
+            return True
+        # ".del @username" — shu userning barcha xabarlarini o'chirish
+        if rest and rest[0].startswith("@"):
+            uname   = rest[0].lstrip("@").lower()
+            hist    = msg_history.get(chat.id, [])
+            to_del  = [m for m in hist if m.get("uname") == uname]
+            ids     = [m["id"] for m in to_del]
+            d, f    = await _del_batch(context, chat.id, ids)
+            del_set = set(ids)
+            if chat.id in msg_history:
+                msg_history[chat.id] = [m for m in msg_history[chat.id] if m["id"] not in del_set]
+            try:
+                await msg.delete()
+            except Exception:
+                pass
+            try:
+                await context.bot.send_message(chat.id, f"🧹 @{uname}: {d} ta xabar o'chirildi.")
+            except Exception:
+                pass
+            return True
+        # ".del" (reply) — bitta xabarni o'chirish
+        if reply:
+            try:
+                await reply.delete()
+            except Exception:
+                pass
+            try:
+                await msg.delete()
+            except Exception:
+                pass
+            return True
+        await msg.reply_text(
+            "❗️ Xabarga javob bering, `.del @username` yoki `.del @ a` yozing.",
+            parse_mode="Markdown")
+        return True
+
+    return True
+
 async def cmd_delmsgs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Guruh xabarlarini o'chirish. /delmsgs <chat_id> [user_id]"""
     if not is_superadmin(update.effective_user.id):
@@ -898,6 +1182,18 @@ async def cmd_setgroup(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "✅ Sinov zaxira nusxasi muvaffaqiyatli yuborildi!" if ok
         else "❌ Zaxira nusxa olishda xatolik — botga tegishli huquqlarni tekshiring.")
 
+async def cmd_togglereaction(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Superadmin: guruhlarda superadmin xabarlariga ⚡ reaksiya
+    bosishni yoqadi/o'chiradi."""
+    if not is_superadmin(update.effective_user.id):
+        return
+    cfg = load_config()
+    cur = cfg.get("lightning_reaction_enabled", True)
+    cfg["lightning_reaction_enabled"] = not cur
+    save_config(cfg)
+    state = "✅ yoqildi" if not cur else "❌ o'chirildi"
+    await update.message.reply_text(f"⚡ Superadmin reaksiyasi {state}.")
+
 async def cmd_createtopic(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Supergroup'da forum topic yaratish. /createtopic <nom>"""
     if not is_superadmin(update.effective_user.id):
@@ -1049,6 +1345,23 @@ async def cmd_addbadword(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_badwords(bw)
     await update.message.reply_text(f"✅ So'z qo'shildi: `{word}`", parse_mode="Markdown")
 
+async def cmd_addsacredname(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Superadmin: diний shaxs nomini ro'yxatga qo'shadi — bu nomlar
+    so'kinish bilan birga kelsa, xabar admin bo'lsa ham o'chiriladi."""
+    if not is_superadmin(update.effective_user.id): return
+    args = context.args
+    if not args:
+        await update.message.reply_text("❌ `/addsacredname Muhammad`", parse_mode="Markdown")
+        return
+    name = " ".join(args).lower().strip()
+    bw   = load_badwords()
+    if name in bw["sacred_names"]:
+        await update.message.reply_text(f"⚠️ `{name}` allaqachon ro'yxatda!",
+                                        parse_mode="Markdown"); return
+    bw["sacred_names"].append(name)
+    save_badwords(bw)
+    await update.message.reply_text(f"✅ Diний nom qo'shildi: `{name}`", parse_mode="Markdown")
+
 async def cmd_addsevereword(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_superadmin(update.effective_user.id): return
     args = context.args
@@ -1158,6 +1471,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (update.message.text or "").strip()
 
     if chat.type in ("group", "supergroup"):
+        if await handle_dot_command(update, context):
+            return
+        if await handle_admin_mode_message(update, context):
+            return
         await _check_answer(update, context)
         return
 
@@ -1523,12 +1840,16 @@ async def check_profanity(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text    = msg.text
     severe  = bw.get("severe_words", [])
     normal  = bw.get("words", [])
+    sacred  = bw.get("sacred_names", [])
     has_severe = _has_badword(text, severe)
     has_normal = _has_badword(text, normal)
     if not has_severe and not has_normal:
         return
+    has_sacred = _has_badword(text, sacred)
+
     warn_msg = mdesc(_random_warning(bw.get("warnings", [])))
     ulink    = f"[{mdesc(user.first_name)}](tg://user?id={user.id})"
+
     try:
         bm = await context.bot.get_chat_member(chat.id, context.bot.id)
         bot_adm = bm.status in ("administrator", "creator")
@@ -1539,17 +1860,48 @@ async def check_profanity(update: Update, context: ContextTypes.DEFAULT_TYPE):
         usr_adm = um.status in ("administrator", "creator")
     except Exception:
         usr_adm = False
-    if has_severe:
-        if bot_adm:
+
+    reply_user  = msg.reply_to_message.from_user if msg.reply_to_message else None
+    target_name = (get_display_name(reply_user.id, reply_user.first_name or "Anonim")
+                   if reply_user else "Umumiy (aniq kimgadir emas)")
+
+    # Diний shaxslar nomi bilan qo'shib so'kinish — eng qattiq chora,
+    # admin bo'lsa ham (leniency ishlamaydi).
+    escalate = has_sacred and (has_severe or has_normal)
+
+    deleted = False
+    if bot_adm and (has_severe or escalate):
+        try:
+            await msg.delete()
+            deleted = True
+        except Exception:
+            pass
+
+    consequence = ""
+    if escalate:
+        try:
+            await context.bot.set_message_reaction(
+                chat_id=chat.id, message_id=msg.message_id,
+                reaction=[ReactionTypeEmoji(emoji="🤬")], is_big=False)
+        except Exception:
+            pass
+        await context.bot.send_message(
+            chat.id,
+            f"🤬 {ulink}, *diний shaxslar nomi bilan so'kinish qat'iyan man etiladi!*\n{warn_msg}",
+            parse_mode="Markdown")
+        consequence = ("O'chirildi + " if deleted else "") + "Diний nom bilan — kuchli ogohlantirish"
+    elif has_severe:
+        if usr_adm:
             try:
-                await msg.delete()
+                await context.bot.set_message_reaction(
+                    chat_id=chat.id, message_id=msg.message_id,
+                    reaction=[ReactionTypeEmoji(emoji="🗿")], is_big=False)
             except Exception:
                 pass
-        if usr_adm:
             await context.bot.send_message(
-                chat.id,
-                f"🚫 {ulink}, *{warn_msg}*\n_(Admin bo'lsangizda ham!)_",
+                chat.id, f"🚫 {ulink}, *{warn_msg}*\n_(Admin bo'lsangizda ham!)_",
                 parse_mode="Markdown")
+            consequence = "Admin — faqat ogohlantirildi (🗿)"
         else:
             kicked = False
             if bot_adm:
@@ -1564,26 +1916,48 @@ async def check_profanity(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 chat.id,
                 f"🚫 {ulink} guruhdan *chiqarib yuborildi!*\n*Sabab:* Juda qo'pol so'z\n\n💬 _{warn_msg}_",
                 parse_mode="Markdown")
-        try:
-            await context.bot.send_message(
-                SUPERADMIN,
-                f"🚨 *QOPOL SO'Z!*\n\n"
-                f"👤 {ulink} | `{user.id}`"
-                + (f" | @{mdesc(user.username)}" if user.username else "")
-                + f"\n💬 Guruh: *{mdesc(chat.title)}* (`{chat.id}`)\n"
-                  f"👮 User admin: {'✅' if usr_adm else '❌'}\n"
-                  f"🦵 Kick: {'✅' if not usr_adm and bot_adm else '❌'}\n\n"
-                  f"📝 Xabar: `{mdesc(text[:300])}`",
-                parse_mode="Markdown")
-        except Exception:
-            pass
+            consequence = "Chiqarib yuborildi" if kicked else "Chiqarish muvaffaqiyatsiz"
     elif has_normal:
-        if bot_adm:
+        if bot_adm and not deleted:
             try:
                 await msg.delete()
+                deleted = True
+            except Exception:
+                pass
+        if usr_adm:
+            try:
+                await context.bot.set_message_reaction(
+                    chat_id=chat.id, message_id=msg.message_id,
+                    reaction=[ReactionTypeEmoji(emoji="🗿")], is_big=False)
             except Exception:
                 pass
         await context.bot.send_message(chat.id, f"⚠️ {ulink}, {warn_msg}", parse_mode="Markdown")
+        consequence = ("O'chirildi" if deleted else "Ogohlantirildi") + (", Admin (🗿)" if usr_adm else "")
+
+    iid = record_incident(chat, user, target_name, text, consequence, usr_adm, escalate)
+    await _notify_incident(context.bot, chat, user, iid)
+
+async def _notify_incident(bot, chat, offender, incident_id: int):
+    """Guruh egasi (creator) va superadminga so'kinish haqida shaxsiy xabar
+    + 'Ko'rish' tugmasi bilan yuboradi."""
+    who = f"@{mdesc(offender.username)}" if offender.username else mdesc(offender.first_name)
+    text = (f"🚨 *So'kinish aniqlandi!*\n\n"
+            f"👤 {who}\n"
+            f"💬 Guruh: *{mdesc(chat.title or str(chat.id))}*")
+    kb = InlineKeyboardMarkup([[IKB("🔍 Ko'rish", callback_data=f"profview:{incident_id}")]])
+    recipients = {SUPERADMIN}
+    try:
+        admins = await bot.get_chat_administrators(chat.id)
+        for a in admins:
+            if a.status == "creator":
+                recipients.add(a.user.id)
+    except Exception as e:
+        logger.warning(f"_notify_incident: adminlarni olib bo'lmadi: {e}")
+    for rid in recipients:
+        try:
+            await bot.send_message(rid, text, parse_mode="Markdown", reply_markup=kb)
+        except Exception as e:
+            logger.debug(f"_notify_incident: {rid} ga yuborilmadi: {e}")
 
 async def group_tracker(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
@@ -1613,8 +1987,8 @@ async def group_tracker(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if tarif in (TARIF_PLUS, TARIF_PREMIUM, TARIF_VIP):
                 asyncio.create_task(send_fire_reaction(context.bot, chat.id, msg.message_id))
 
-        # ⚡ Reaksiya — superadmin xabarlariga
-        if u.id == SUPERADMIN:
+        # ⚡ Reaksiya — superadmin xabarlariga (agar yoqilgan bo'lsa)
+        if u.id == SUPERADMIN and load_config().get("lightning_reaction_enabled", True):
             asyncio.create_task(send_lightning_reaction(context.bot, chat.id, msg.message_id))
 
     if msg.text:
@@ -1669,6 +2043,27 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await q.answer()
     uid  = q.from_user.id
     data = q.data
+
+    # ── So'kinish hodisasi tafsiloti ──
+    if data.startswith("profview:"):
+        iid = int(data.split(":", 1)[1])
+        it  = get_incident(iid)
+        if not it:
+            await q.answer("❌ Topilmadi (eskirgan bo'lishi mumkin).", show_alert=True)
+            return
+        uname = f" (@{mdesc(it['offender_username'])})" if it.get("offender_username") else ""
+        text = (
+            f"🚨 *Hodisa #{it['id']}*\n\n"
+            f"🕐 Vaqt: {it['time']}\n"
+            f"💬 Guruh: {mdesc(it['chat_title'])}\n"
+            f"👤 Kim: {mdesc(it['offender_name'])}{uname}\n"
+            f"🎯 Kimga: {mdesc(it['target'])}\n"
+            f"📝 Nima deb: `{mdesc(it['text'])}`\n"
+            f"⚖️ Oqibat: {mdesc(it['consequence'])}"
+            + ("\n🕌 *Diний nom bilan!*" if it.get("sacred_name") else "")
+        )
+        await q.edit_message_text(text, parse_mode="Markdown")
+        return
 
     # ── User menu ──
     if data.startswith("u:") or data == "u:back":
@@ -2487,9 +2882,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         qs = t["questions"].copy()
         random.shuffle(qs)
-        g.update({"active": True, "topic": tn, "emoji": t["emoji"],
-                  "questions": qs, "asked": 0, "current": None,
-                  "current_msg_id": None, "scores": {}, "waiting": False})
+        g.update({"active": True, "mode": "standard", "topic": tn, "emoji": t["emoji"],
+                  "questions": qs, "asked": 0, "current": None, "current_reversed": False,
+                  "current_msg_id": None, "scores": {}, "waiting": False,
+                  "time_limit": None, "admin_ranks": [], "started_by": q.from_user.id})
         await q.edit_message_text(
             f"🎮 *O'YIN BOSHLANDI!*\n\n{t['emoji']} *{tn.capitalize()}*\n"
             f"📊 {len(qs)} ta savol",
@@ -2587,6 +2983,7 @@ async def run_bot():
         ("sendas",          cmd_sendas),
         ("requireadmin",    cmd_requireadmin),
         ("addbadword",      cmd_addbadword),
+        ("addsacredname",   cmd_addsacredname),
         ("addsevereword",   cmd_addsevereword),
         ("addwarning",      cmd_addwarning),
         ("listbadwords",    cmd_listbadwords),
@@ -2600,6 +2997,7 @@ async def run_bot():
         ("setchannel",      cmd_setchannel),
         ("delmsgs",         cmd_delmsgs),
         ("delbotmsg",       cmd_delbotmsg),
+        ("togglereaction",  cmd_togglereaction),
         ("createtopic",     cmd_createtopic),
         ("setgroup",        cmd_setgroup),
         ("userinfo",        cmd_userinfo),
