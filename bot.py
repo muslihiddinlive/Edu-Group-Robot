@@ -396,48 +396,65 @@ async def _process_bulkq(update: Update, context: ContextTypes.DEFAULT_TYPE, raw
         await update.message.reply_text("❌ Topic topilmadi.")
         context.user_data.clear()
         return
-    mq    = get_admin_max_questions(uid)
-    text  = (raw or update.message.text or "").strip()
-    lines = [l.strip() for l in text.splitlines() if l.strip()]
-    added = skipped = 0
-    errors = []
-    lim    = mq - len(t["questions"])
-    for line in lines:
-        if added >= lim:
-            skipped += len(lines) - lines.index(line)
-            break
-        parts = [p.strip() for p in line.split("-") if p.strip()]
-        if len(parts) < 2:
-            errors.append(f"• `{line[:40]}`")
-            continue
-        t["questions"].append({
-            "question":     parts[0],
-            "answer":       parts[1].lower(),
-            "alternatives": [p.lower() for p in parts[2:]],
-            "media_type":   "none",
-            "file_id":      None,
-        })
-        added += 1
-    save_topic(t)
-    cnt = len(t["questions"])
-    msg = f"✅ *{added} ta savol qo'shildi!*\n📊 {t['emoji']} {tn}: {cnt}/{mq}"
-    if skipped:
-        msg += f"\n⚠️ {skipped} ta o'tkazildi (limit to'ldi)"
-    if errors:
-        msg += "\n\n❌ *Xatolar:*\n" + "\n".join(errors[:5])
-    kb = None
-    back_cb = "menu:back" if is_admin_or_superadmin(uid) else "u:back"
-    if cnt < mq:
-        kb = InlineKeyboardMarkup([
-            [IKB("➕ Yana savollar", callback_data="bulkq_more"),
-             IKB("⏹ Tugatish",      callback_data="addq_finish")],
-            [IKB("🏠 Bosh menyu", callback_data=back_cb)],
-        ])
-    else:
-        kb = InlineKeyboardMarkup([[IKB("🏠 Bosh menyu", callback_data=back_cb)]])
-    await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=kb)
-    if cnt >= mq:
-        context.user_data.clear()
+    try:
+        mq    = get_admin_max_questions(uid)
+        text  = (raw or update.message.text or "").strip()
+        # Word/Docs'dan nusxalanganda "-" o'rniga turli chiziqchalar
+        # (–, —, ‑, −) paydo bo'lishi mumkin — ularni ham qabul qilamiz
+        for dash in ("–", "—", "‑", "−"):
+            text = text.replace(dash, "-")
+        lines = [l.strip() for l in text.splitlines() if l.strip()]
+        added = skipped = 0
+        errors = []
+        lim    = mq - len(t["questions"])
+        for line in lines:
+            if added >= lim:
+                skipped += len(lines) - lines.index(line)
+                break
+            parts = [p.strip() for p in line.split("-") if p.strip()]
+            if len(parts) < 2:
+                errors.append(f"• `{line[:40]}`")
+                continue
+            t["questions"].append({
+                "question":     parts[0],
+                "answer":       parts[1].lower(),
+                "alternatives": [p.lower() for p in parts[2:]],
+                "media_type":   "none",
+                "file_id":      None,
+            })
+            added += 1
+        save_topic(t)
+        cnt = len(t["questions"])
+        msg = f"✅ *{added} ta savol qo'shildi!*\n📊 {t['emoji']} {tn}: {cnt}/{mq}"
+        if skipped:
+            msg += f"\n⚠️ {skipped} ta o'tkazildi (limit to'ldi)"
+        if errors:
+            msg += (f"\n\n❌ *{len(errors)} ta qator noto'g'ri formatda "
+                     f"(kamida bitta \"-\" bo'lishi kerak):*\n" + "\n".join(errors[:5]))
+            if len(errors) > 5:
+                msg += f"\n… va yana {len(errors) - 5} ta"
+        kb = None
+        back_cb = "menu:back" if is_admin_or_superadmin(uid) else "u:back"
+        if cnt < mq:
+            kb = InlineKeyboardMarkup([
+                [IKB("➕ Yana savollar", callback_data="bulkq_more"),
+                 IKB("⏹ Tugatish",      callback_data="addq_finish")],
+                [IKB("🏠 Bosh menyu", callback_data=back_cb)],
+            ])
+        else:
+            kb = InlineKeyboardMarkup([[IKB("🏠 Bosh menyu", callback_data=back_cb)]])
+        await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=kb)
+        if cnt >= mq:
+            context.user_data.clear()
+    except Exception as e:
+        logger.error(f"_process_bulkq xato: {e}")
+        try:
+            await update.message.reply_text(
+                "⚠️ Savollarni qo'shishda kutilmagan xatolik yuz berdi. "
+                "Formatni tekshirib qayta yuboring (masalan: `so'z - tarjima`).",
+                parse_mode="Markdown")
+        except Exception:
+            pass
 
 async def cmd_listtopics(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
@@ -1497,13 +1514,29 @@ async def cmd_skip(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin_or_superadmin(update.effective_user.id):
         return
-    tn  = context.user_data.get("topic_name", "?")
-    t   = load_topic(tn)
-    cnt = len(t["questions"]) if t else 0
-    context.user_data.clear()
-    await update.message.reply_text(
-        f"✅ *Tugatildi!*\n{tn}: {cnt} ta savol saqlangan.",
-        parse_mode="Markdown")
+    try:
+        tn  = context.user_data.get("topic_name", "?")
+        t   = load_topic(tn) if tn and tn != "?" else None
+        cnt = len(t["questions"]) if t else 0
+        context.user_data.clear()
+        if t:
+            await update.message.reply_text(
+                f"✅ *Tugatildi!*\n{tn}: {cnt} ta savol saqlangan.",
+                parse_mode="Markdown")
+        else:
+            await update.message.reply_text(
+                "✅ *Tugatildi!* (Faol savol qo'shish jarayoni topilmadi — "
+                "ehtimol allaqachon yakunlangan edi.)",
+                parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"cmd_done xato: {e}")
+        context.user_data.clear()
+        try:
+            await update.message.reply_text(
+                "⚠️ Yakunlashda xatolik yuz berdi, lekin jarayon tozalandi. "
+                "Qayta urinib ko'ring.")
+        except Exception:
+            pass
 
 # ══════════════════════════════════════════════════════
 #  TEXT HANDLER
