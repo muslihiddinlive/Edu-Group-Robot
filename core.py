@@ -730,7 +730,8 @@ def get_game(chat_id: int) -> dict:
         games[chat_id] = {
             "active": False, "mode": "standard", "topic": None, "emoji": "",
             "questions": [], "asked": 0, "current": None, "current_reversed": False,
-            "current_msg_id": None, "scores": {}, "waiting": False,
+            "current_msg_id": None, "last_wrong_msg_id": None,
+            "scores": {}, "waiting": False,
             "time_limit": None,
             # Admin (module 1) uchun:
             "admin_ranks": [], "started_by": None,
@@ -1111,6 +1112,8 @@ ADMIN_COMMANDS = PUBLIC_COMMANDS + [
     ("listadmins",      "Adminlar ro'yxati"),
     ("editadmin",       "Admin ma'lumotini tahrirlash"),
     ("setdisplayname",  "Ko'rinadigan ismni o'rnatish"),
+    ("getemojiid",      "Premium emoji ID'sini topish"),
+    ("addchatadmin",    "Guruh/kanalga admin tayinlash"),
     ("sendas",          "Bot nomidan xabar yuborish"),
     ("requireadmin",    "Guruhda faqat admin ishlatishini talab qilish"),
     ("addbadword",      "Taqiqlangan so'z qo'shish"),
@@ -1355,6 +1358,7 @@ async def send_question(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
     q = g["questions"][g["asked"]]
     g["asked"] += 1
     g["current"] = q
+    g["last_wrong_msg_id"] = None
 
     # Lang mode: tasodifiy savol/javob tomonini almashtiradi
     reversed_ = False
@@ -1425,7 +1429,7 @@ async def _check_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if g.get("mode") == "admin":
         return  # admin mode savol-javob bilan ishlamaydi
     reply = update.message.reply_to_message
-    if reply is None or reply.message_id != g["current_msg_id"]:
+    if reply is None or reply.message_id not in (g["current_msg_id"], g.get("last_wrong_msg_id")):
         return
     user    = update.effective_user
     uid_s   = str(user.id)
@@ -1474,9 +1478,12 @@ async def _check_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await send_question(cid, context)
     else:
         # Standard / Lang: to'g'ri javob aytilmaydi, xuddi shu savol
-        # kutishda davom etadi (keyingisiga o'tmaydi)
-        await update.message.reply_text(
+        # kutishda davom etadi (keyingisiga o'tmaydi). Foydalanuvchi
+        # asl savolga HAM, shu "Noto'g'ri" xabariga HAM javoban yozsa
+        # qabul qilinishi uchun uning message_id'sini ham eslab qolamiz.
+        sent = await update.message.reply_text(
             "❌ *Noto'g'ri!* Yana urinib ko'ring 🔁", parse_mode="Markdown")
+        g["last_wrong_msg_id"] = sent.message_id
 
 async def finish_game(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
     g = get_game(chat_id)

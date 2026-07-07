@@ -1357,6 +1357,37 @@ async def cmd_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown", reply_markup=kb)
 
 # PLUS/MINUS komandalar
+async def cmd_addchatadmin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Superadmin: bot admin bo'lgan istalgan guruh YOKI kanalga boshqa
+    foydalanuvchini admin qilib tayinlaydi."""
+    if not is_superadmin(update.effective_user.id):
+        return
+    chats = load_chats()
+    if not chats:
+        await update.message.reply_text("❌ Ro'yxatda hech qanday guruh/kanal yo'q.")
+        return
+    btns = []
+    for k, v in chats.items():
+        icon = "📢" if v.get("type") == "channel" else "👥"
+        btns.append([IKB(f"{icon} {v.get('name', k)}", callback_data=f"acadm_chat:{k}")])
+    await update.message.reply_text(
+        "👮 *Qaysi guruh/kanalga admin tayinlaysiz?*\n\n"
+        "_(Bot o'sha joyda admin va \"Add new admins\" huquqiga ega bo'lishi kerak)_",
+        parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(btns))
+
+async def cmd_getemojiid(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Superadmin: premium/custom emojining ID'sini topishga yordam beradi.
+    Keyingi xabarda shu emojini (asl holicha, nusxalanmagan, Premium
+    akkountdan) yuborsa, bot uning custom_emoji_id'sini o'qib beradi."""
+    if not is_superadmin(update.effective_user.id):
+        return
+    context.user_data["step"] = "emojiid_waiting"
+    await update.message.reply_text(
+        "😀 Endi ID'sini bilmoqchi bo'lgan *premium emojini* shu yerga yuboring "
+        "(albatta Telegram Premium akkountdan, asl holicha — skrinshot yoki "
+        "nusxalangan oddiy emoji ishlamaydi).",
+        parse_mode="Markdown")
+
 async def cmd_sendas(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_superadmin(update.effective_user.id):
         return
@@ -1694,6 +1725,63 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"✅ `{target}` uchun premium/animatsion reaksiya (ID: `{cid}`) belgilandi.",
             parse_mode="Markdown")
+        return
+
+    if step == "emojiid_waiting" and is_superadmin(uid):
+        context.user_data.pop("step", None)
+        entities = update.message.entities or []
+        ids = [e.custom_emoji_id for e in entities if e.type == "custom_emoji"]
+        if ids:
+            lines = "\n".join(f"`{i}`" for i in ids)
+            await update.message.reply_text(
+                f"🆔 *Topilgan custom emoji ID(lar):*\n{lines}\n\n"
+                "Buni `ReactionTypeCustomEmoji(custom_emoji_id=\"...\")` "
+                "ichida ishlatishingiz mumkin.", parse_mode="Markdown")
+        else:
+            await update.message.reply_text(
+                "❌ Bu xabarda premium/custom emoji topilmadi.\n\n"
+                "Sabablari: (1) bu oddiy (Premium bo'lmagan) emoji edi, "
+                "(2) rasm/skrinshot sifatida yuborildi, yoki (3) sizda "
+                "Telegram Premium yo'q — faqat Premium foydalanuvchi bunday "
+                "emojini asl holicha yubora oladi.")
+        return
+
+    if step == "acadm_waiting_user" and is_superadmin(uid):
+        target_chat = context.user_data.pop("acadm_chat", None)
+        context.user_data.pop("step", None)
+        target_uid  = None
+        target_name = None
+        fwd = update.message.forward_from
+        if fwd:
+            target_uid, target_name = fwd.id, (fwd.first_name or str(fwd.id))
+        elif text.startswith("@"):
+            found = _find_user_by_username(text)
+            if found:
+                target_uid, target_name, _ = found
+        else:
+            try:
+                target_uid  = int(text.strip())
+                target_name = str(target_uid)
+            except ValueError:
+                pass
+        if target_uid is None:
+            await update.message.reply_text(
+                "❌ Foydalanuvchi topilmadi. Xabarini *forward* qiling yoki "
+                "`@username` / user ID yuboring.", parse_mode="Markdown")
+            return
+        try:
+            await context.bot.promote_chat_member(
+                target_chat, target_uid,
+                can_change_info=True, can_delete_messages=True, can_invite_users=True,
+                can_restrict_members=True, can_pin_messages=True,
+                can_manage_chat=True, can_manage_video_chats=True)
+            chats     = load_chats()
+            chat_name = chats.get(str(target_chat), {}).get("name", str(target_chat))
+            await update.message.reply_text(
+                f"✅ {mdesc(target_name)} — *{mdesc(chat_name)}*da admin qilindi!",
+                parse_mode="Markdown")
+        except Exception as e:
+            await update.message.reply_text(f"❌ Xatolik: {e}")
         return
 
     if step == "grant_ref_waiting" and is_superadmin(uid):
@@ -2145,6 +2233,18 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await q.answer()
     uid  = q.from_user.id
     data = q.data
+
+    # ── Guruh/kanalga admin tayinlash ──
+    if data.startswith("acadm_chat:"):
+        if not is_superadmin(uid): return
+        target_chat = int(data.split(":", 1)[1])
+        context.user_data.clear()
+        context.user_data.update({"step": "acadm_waiting_user", "acadm_chat": target_chat})
+        await q.edit_message_text(
+            "👤 Endi admin qilmoqchi bo'lgan foydalanuvchining biror xabarini "
+            "*forward* qiling, yoki `@username` / user ID yuboring:",
+            parse_mode="Markdown")
+        return
 
     # ── Userlar ro'yxati / tafsiloti / tarif-referral berish ──
     if data.startswith("userslist:"):
@@ -3168,6 +3268,8 @@ async def run_bot():
         ("listadmins",      cmd_listadmins),
         ("editadmin",       cmd_editadmin),
         ("setdisplayname",  cmd_setdisplayname),
+        ("getemojiid",      cmd_getemojiid),
+        ("addchatadmin",    cmd_addchatadmin),
         ("sendas",          cmd_sendas),
         ("requireadmin",    cmd_requireadmin),
         ("addbadword",      cmd_addbadword),
