@@ -39,9 +39,11 @@ class FakeMsg:
         self.forward_from = forward_from
         self.entities = entities or []
         self.replies = []
+        self.reply_markups = []
 
-    async def reply_text(self, text, **kw):
+    async def reply_text(self, text, reply_markup=None, **kw):
         self.replies.append(text)
+        self.reply_markups.append(reply_markup)
         return FakeSent()
 
 
@@ -86,6 +88,26 @@ def ctx():
     c.args = []
     c.user_data = {}
     return c
+
+
+class FakeQ:
+    def __init__(self, uid, data):
+        self.from_user = FUser(uid)
+        self.data = data
+        self.message = SimpleNamespace(chat=SimpleNamespace(id=1))
+        self.edits = []
+
+    async def answer(self, *a, **kw):
+        pass
+
+    async def edit_message_text(self, text, **kw):
+        self.edits.append(text)
+
+
+class FUpdateCB:
+    def __init__(self, uid, data):
+        self.callback_query = FakeQ(uid, data)
+        self.effective_user = FUser(uid)
 
 
 # ══════════════════════════════════════════════════════
@@ -261,45 +283,121 @@ async def test_addchatadmin_promote_failure_reported(bot, ctx):
 
 
 # ══════════════════════════════════════════════════════
-# 3) Premium/custom emoji ID finder
+# 3) Emoji pack picker (sticker-set name -> inline picker)
 # ══════════════════════════════════════════════════════
 
-class FakeEntity:
-    def __init__(self, type_, custom_emoji_id=None):
-        self.type = type_
+class FakeSticker:
+    def __init__(self, emoji, custom_emoji_id):
+        self.emoji = emoji
         self.custom_emoji_id = custom_emoji_id
+
+
+class FakeStickerSet:
+    def __init__(self, stickers):
+        self.stickers = stickers
+
+
+def _find_btn(kb, cb_prefix):
+    for row in kb.inline_keyboard:
+        for b in row:
+            if b.callback_data.startswith(cb_prefix):
+                return b
+    return None
 
 
 @pytest.mark.asyncio
 async def test_getemojiid_starts_waiting_step(bot, ctx):
     update = FUpdate(SUPERADMIN_ID, "/getemojiid")
     await bot.cmd_getemojiid(update, ctx)
-    assert ctx.user_data.get("step") == "emojiid_waiting"
+    assert ctx.user_data.get("step") == "emojipack_waiting"
 
 
 @pytest.mark.asyncio
-async def test_getemojiid_extracts_custom_emoji_id(bot, ctx):
-    ctx.user_data["step"] = "emojiid_waiting"
-    entities = [FakeEntity("custom_emoji", "5368324170671202286")]
-    update = FUpdate(SUPERADMIN_ID, "🔥", entities=entities)
+async def test_emojipack_shows_inline_picker(bot, ctx):
+    ctx.user_data["step"] = "emojipack_waiting"
+    ctx.bot.get_sticker_set = AsyncMock(return_value=FakeStickerSet([
+        FakeSticker("🔥", "111"), FakeSticker("🎉", "222"),
+    ]))
+    update = FUpdate(SUPERADMIN_ID, "MyPack")
     await bot.handle_text(update, ctx)
-    assert any("5368324170671202286" in r for r in update.message.replies)
-    assert "step" not in ctx.user_data
+    ctx.bot.get_sticker_set.assert_awaited_once_with("MyPack")
+    assert update.message.reply_markups
+    kb = update.message.reply_markups[-1]
+    assert _find_btn(kb, "epick:0") is not None
+    assert _find_btn(kb, "epick:1") is not None
+    assert ctx.user_data["epack_items"][0]["id"] == "111"
 
 
 @pytest.mark.asyncio
-async def test_getemojiid_no_custom_emoji_found(bot, ctx):
-    ctx.user_data["step"] = "emojiid_waiting"
-    update = FUpdate(SUPERADMIN_ID, "oddiy matn", entities=[])
+async def test_emojipack_not_found_reports_error(bot, ctx):
+    ctx.user_data["step"] = "emojipack_waiting"
+    ctx.bot.get_sticker_set = AsyncMock(side_effect=Exception("STICKERSET_INVALID"))
+    update = FUpdate(SUPERADMIN_ID, "GhostPack")
     await bot.handle_text(update, ctx)
     assert any("topilmadi" in r for r in update.message.replies)
 
 
 @pytest.mark.asyncio
-async def test_getemojiid_multiple_ids_all_returned(bot, ctx):
-    ctx.user_data["step"] = "emojiid_waiting"
-    entities = [FakeEntity("custom_emoji", "111"), FakeEntity("custom_emoji", "222")]
-    update = FUpdate(SUPERADMIN_ID, "🔥🎉", entities=entities)
+async def test_emojipack_with_no_custom_emojis(bot, ctx):
+    ctx.user_data["step"] = "emojipack_waiting"
+    ctx.bot.get_sticker_set = AsyncMock(return_value=FakeStickerSet([
+        SimpleNamespace(emoji="🔥", custom_emoji_id=None),
+    ]))
+    update = FUpdate(SUPERADMIN_ID, "RegularStickers")
     await bot.handle_text(update, ctx)
-    reply = update.message.replies[-1]
-    assert "111" in reply and "222" in reply
+    assert any("custom emoji topilmadi" in r for r in update.message.replies)
+
+
+@pytest.mark.asyncio
+async def test_epick_callback_reveals_id(bot, ctx):
+    ctx.user_data["epack_items"] = [{"id": "555", "glyph": "🔥"},
+                                     {"id": "666", "glyph": "🎉"}]
+    update = FUpdateCB(SUPERADMIN_ID, "epick:1")
+    await bot.callback_handler(update, ctx)
+    assert any("666" in e for e in update.callback_query.edits)
+
+
+@pytest.mark.asyncio
+async def test_epage_pagination(bot, ctx):
+    items = [{"id": str(i), "glyph": "🔥"} for i in range(50)]
+    ctx.user_data["epack_items"] = items
+    ctx.user_data["epack_name"] = "Big"
+    update = FUpdateCB(SUPERADMIN_ID, "epage:1")
+    await bot.callback_handler(update, ctx)
+    assert "2-sahifa" in update.callback_query.edits[0]
+
+
+@pytest.mark.asyncio
+async def test_epick_stale_session_handled(bot, ctx):
+    ctx.user_data.clear()
+    update = FUpdateCB(SUPERADMIN_ID, "epick:0")
+    await bot.callback_handler(update, ctx)
+    assert any("eskirgan" in e for e in update.callback_query.edits)
+
+
+# ══════════════════════════════════════════════════════
+# 4) Editadmin: toggle can_add_admins
+# ══════════════════════════════════════════════════════
+
+@pytest.mark.asyncio
+async def test_editadmin_toggle_can_add_admins_on(bot, ctx):
+    bot.save_admins({"333": {"topic_limit": 2, "max_questions": 100, "added_by": SUPERADMIN_ID}})
+    update = FUpdateCB(SUPERADMIN_ID, "eal_ca:333")
+    await bot.callback_handler(update, ctx)
+    adm = bot.load_admins()
+    assert adm["333"]["can_add_admins"] is True
+    assert adm["333"]["sub_admin_settings"]["max_topic_limit"] == 2
+    assert any("✅" in e for e in update.callback_query.edits)
+
+
+@pytest.mark.asyncio
+async def test_editadmin_toggle_can_add_admins_off(bot, ctx):
+    bot.save_admins({"333": {"topic_limit": 2, "max_questions": 100, "added_by": SUPERADMIN_ID,
+                              "can_add_admins": True,
+                              "sub_admin_settings": {"max_admins": 5, "max_topic_limit": 2,
+                                                       "max_questions_per_topic": 100}}})
+    update = FUpdateCB(SUPERADMIN_ID, "eal_ca:333")
+    await bot.callback_handler(update, ctx)
+    adm = bot.load_admins()
+    assert adm["333"]["can_add_admins"] is False
+

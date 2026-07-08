@@ -1375,17 +1375,43 @@ async def cmd_addchatadmin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "_(Bot o'sha joyda admin va \"Add new admins\" huquqiga ega bo'lishi kerak)_",
         parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(btns))
 
+EMOJI_PACK_PAGE_SIZE = 40  # 8 satr x 5 tugma
+
+def _build_emoji_pack_page(items: list, pack_name: str, page: int):
+    per_page = EMOJI_PACK_PAGE_SIZE
+    start = page * per_page
+    chunk = items[start:start + per_page]
+    rows, row = [], []
+    for i, item in enumerate(chunk, start=start):
+        row.append(IKB(item["glyph"], callback_data=f"epick:{i}"))
+        if len(row) == 5:
+            rows.append(row); row = []
+    if row:
+        rows.append(row)
+    nav = []
+    if page > 0:
+        nav.append(IKB("⬅️", callback_data=f"epage:{page-1}"))
+    if start + per_page < len(items):
+        nav.append(IKB("➡️", callback_data=f"epage:{page+1}"))
+    if nav:
+        rows.append(nav)
+    text = (f"📦 *{mdesc(pack_name)}* — {len(items)} ta emoji, {page + 1}-sahifa\n\n"
+            "Birini tanlang _(ba'zi emojilar bir xil belgi bilan ko'rinishi "
+            "mumkin — kerak bo'lsa bir nechtasini sinab ko'ring)_:")
+    return text, InlineKeyboardMarkup(rows)
+
 async def cmd_getemojiid(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Superadmin: premium/custom emojining ID'sini topishga yordam beradi.
-    Keyingi xabarda shu emojini (asl holicha, nusxalanmagan, Premium
-    akkountdan) yuborsa, bot uning custom_emoji_id'sini o'qib beradi."""
+    """Superadmin: emoji pack (custom emoji sticker set) nomini so'raydi,
+    keyin o'sha pack'dagi barcha emojilarni inline tugmalar qilib
+    chiqaradi — birini tanlasa, custom_emoji_id'sini beradi."""
     if not is_superadmin(update.effective_user.id):
         return
-    context.user_data["step"] = "emojiid_waiting"
+    context.user_data["step"] = "emojipack_waiting"
     await update.message.reply_text(
-        "😀 Endi ID'sini bilmoqchi bo'lgan *premium emojini* shu yerga yuboring "
-        "(albatta Telegram Premium akkountdan, asl holicha — skrinshot yoki "
-        "nusxalangan oddiy emoji ishlamaydi).",
+        "📦 Emoji pack (sticker set) nomini yuboring.\n\n"
+        "_Nomini topish: pack'dagi istalgan emojini bosing → \"Share\" yoki "
+        "pack havolasidagi `addemoji/` dan keyingi qism (masalan "
+        "`t.me/addemoji/`*`MyPack`*` — shu yerda \"MyPack\" nomi kerak)._",
         parse_mode="Markdown")
 
 async def cmd_sendas(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1727,23 +1753,25 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown")
         return
 
-    if step == "emojiid_waiting" and is_superadmin(uid):
+    if step == "emojipack_waiting" and is_superadmin(uid):
         context.user_data.pop("step", None)
-        entities = update.message.entities or []
-        ids = [e.custom_emoji_id for e in entities if e.type == "custom_emoji"]
-        if ids:
-            lines = "\n".join(f"`{i}`" for i in ids)
+        pack_name = text.strip().lstrip("@")
+        try:
+            ss = await context.bot.get_sticker_set(pack_name)
+        except Exception as e:
+            await update.message.reply_text(f"❌ Pack topilmadi: {e}")
+            return
+        items = [{"id": s.custom_emoji_id, "glyph": s.emoji or "❓"}
+                 for s in ss.stickers if getattr(s, "custom_emoji_id", None)]
+        if not items:
             await update.message.reply_text(
-                f"🆔 *Topilgan custom emoji ID(lar):*\n{lines}\n\n"
-                "Buni `ReactionTypeCustomEmoji(custom_emoji_id=\"...\")` "
-                "ichida ishlatishingiz mumkin.", parse_mode="Markdown")
-        else:
-            await update.message.reply_text(
-                "❌ Bu xabarda premium/custom emoji topilmadi.\n\n"
-                "Sabablari: (1) bu oddiy (Premium bo'lmagan) emoji edi, "
-                "(2) rasm/skrinshot sifatida yuborildi, yoki (3) sizda "
-                "Telegram Premium yo'q — faqat Premium foydalanuvchi bunday "
-                "emojini asl holicha yubora oladi.")
+                "❌ Bu pack'da custom emoji topilmadi (ehtimol bu oddiy "
+                "stiker to'plami, emoji pack emas).")
+            return
+        context.user_data["epack_items"] = items
+        context.user_data["epack_name"]  = pack_name
+        text_out, kb = _build_emoji_pack_page(items, pack_name, 0)
+        await update.message.reply_text(text_out, parse_mode="Markdown", reply_markup=kb)
         return
 
     if step == "acadm_waiting_user" and is_superadmin(uid):
@@ -2233,6 +2261,33 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await q.answer()
     uid  = q.from_user.id
     data = q.data
+
+    # ── Emoji pack picker ──
+    if data.startswith("epage:"):
+        if not is_superadmin(uid): return
+        items = context.user_data.get("epack_items")
+        pack_name = context.user_data.get("epack_name", "?")
+        if not items:
+            await q.edit_message_text("⚠️ Sessiya eskirgan, qaytadan /getemojiid yuboring.")
+            return
+        page = int(data.split(":")[1])
+        text_out, kb = _build_emoji_pack_page(items, pack_name, page)
+        await q.edit_message_text(text_out, parse_mode="Markdown", reply_markup=kb)
+        return
+
+    if data.startswith("epick:"):
+        if not is_superadmin(uid): return
+        idx   = int(data.split(":")[1])
+        items = context.user_data.get("epack_items")
+        if not items or idx >= len(items):
+            await q.edit_message_text("⚠️ Sessiya eskirgan, qaytadan /getemojiid yuboring.")
+            return
+        item = items[idx]
+        await q.edit_message_text(
+            f"🆔 *Tanlangan emoji ID:*\n`{item['id']}`\n\n"
+            "Buni `ReactionTypeCustomEmoji(custom_emoji_id=\"...\")` "
+            "ichida ishlatishingiz mumkin.", parse_mode="Markdown")
+        return
 
     # ── Guruh/kanalga admin tayinlash ──
     if data.startswith("acadm_chat:"):
@@ -2795,6 +2850,26 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         adm = load_admins()
         if str(uid_e) not in adm: return
         adm[str(uid_e)]["max_questions"] = val
+        save_admins(adm)
+        await q.edit_message_text(_editadmin_txt(uid_e, adm[str(uid_e)]),
+                                  parse_mode="Markdown",
+                                  reply_markup=_editadmin_kb(uid_e, adm[str(uid_e)]))
+        return
+
+    if data.startswith("eal_ca:"):
+        if not is_superadmin(uid): return
+        uid_e = int(data.split(":")[1])
+        adm = load_admins()
+        if str(uid_e) not in adm: return
+        info = adm[str(uid_e)]
+        new_state = not info.get("can_add_admins", False)
+        info["can_add_admins"] = new_state
+        if new_state and not info.get("sub_admin_settings"):
+            info["sub_admin_settings"] = {
+                "max_admins":              5,
+                "max_topic_limit":         info.get("topic_limit", 1),
+                "max_questions_per_topic": info.get("max_questions", MAX_QUESTIONS),
+            }
         save_admins(adm)
         await q.edit_message_text(_editadmin_txt(uid_e, adm[str(uid_e)]),
                                   parse_mode="Markdown",

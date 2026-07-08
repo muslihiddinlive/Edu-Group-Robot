@@ -1800,6 +1800,7 @@ def _aa_sub_ql_kb() -> InlineKeyboardMarkup:
 def _editadmin_kb(uid_e: int, info: dict) -> InlineKeyboardMarkup:
     tl = info["topic_limit"]
     mq = info.get("max_questions", MAX_QUESTIONS)
+    ca = info.get("can_add_admins", False)
     row_t = [IKB(f"✅{v}" if tl == v else str(v), callback_data=f"eal_t:{uid_e}:{v}")
              for v in [1, 2, 3, 5, 10]]
     row_q = [IKB(f"✅{v}" if mq == v else str(v), callback_data=f"eal_q:{uid_e}:{v}")
@@ -1808,6 +1809,8 @@ def _editadmin_kb(uid_e: int, info: dict) -> InlineKeyboardMarkup:
         row_t, row_q,
         [IKB("🏷 Nom o'zgartirish", callback_data=f"eal_dn:{uid_e}"),
          IKB("❌ O'chirish",        callback_data=f"del_adm:{uid_e}")],
+        [IKB(f"👥 Admin qo'sha olish: {'✅' if ca else '❌'}",
+             callback_data=f"eal_ca:{uid_e}")],
         [IKB("⬅️ Orqaga",           callback_data="list_adm_cb")],
     ])
 
