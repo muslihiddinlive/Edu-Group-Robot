@@ -1811,6 +1811,7 @@ def _editadmin_kb(uid_e: int, info: dict) -> InlineKeyboardMarkup:
          IKB("❌ O'chirish",        callback_data=f"del_adm:{uid_e}")],
         [IKB(f"👥 Admin qo'sha olish: {'✅' if ca else '❌'}",
              callback_data=f"eal_ca:{uid_e}")],
+        [IKB("🎭 Reaksiya belgilash", callback_data=f"admreact_page:{uid_e}:0")],
         [IKB("⬅️ Orqaga",           callback_data="list_adm_cb")],
     ])
 

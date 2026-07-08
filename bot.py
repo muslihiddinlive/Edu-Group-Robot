@@ -1750,7 +1750,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_admins(adm)
         await update.message.reply_text(
             f"✅ `{target}` uchun premium/animatsion reaksiya (ID: `{cid}`) belgilandi.",
-            parse_mode="Markdown")
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(
+                [[IKB("⬅️ Admin sozlamalariga", callback_data=f"edit_adm:{target}")]]))
         return
 
     if step == "emojipack_waiting" and is_superadmin(uid):
@@ -2919,9 +2921,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             adm[str(target)].pop("reaction_emoji", None)
             adm[str(target)].pop("reaction_custom_emoji_id", None)
             save_admins(adm)
+        back_kb = InlineKeyboardMarkup(
+            [[IKB("⬅️ Admin sozlamalariga", callback_data=f"edit_adm:{target}")]]
+        ) if str(target) in adm else None
         await q.edit_message_text(
             f"✅ `{target}` uchun standart reaksiya (🔥) qo'llaniladi.",
-            parse_mode="Markdown")
+            parse_mode="Markdown", reply_markup=back_kb)
         return
 
     if data.startswith("admreact:"):
@@ -2937,7 +2942,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         save_admins(adm)
         await q.edit_message_text(
             f"✅ `{target}` uchun reaksiya belgilandi: {emoji}",
-            parse_mode="Markdown")
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(
+                [[IKB("⬅️ Admin sozlamalariga", callback_data=f"edit_adm:{target}")]]))
         return
 
     if data.startswith("edit_adm:"):
