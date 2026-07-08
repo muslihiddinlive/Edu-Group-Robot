@@ -1375,6 +1375,19 @@ async def cmd_addchatadmin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "_(Bot o'sha joyda admin va \"Add new admins\" huquqiga ega bo'lishi kerak)_",
         parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(btns))
 
+def _extract_pack_name(text: str) -> str | None:
+    """'developeremojis', '@developeremojis',
+    'https://t.me/addemoji/developeremojis' yoki
+    't.me/addstickers/developeremojis' — barchasidan pack nomini ajratadi."""
+    t = text.strip()
+    m = re.search(r"t\.me/(?:addemoji|addstickers)/([A-Za-z0-9_]+)", t, re.IGNORECASE)
+    if m:
+        return m.group(1)
+    t = t.lstrip("@").strip()
+    if re.fullmatch(r"[A-Za-z0-9_]+", t):
+        return t
+    return None
+
 EMOJI_PACK_PAGE_SIZE = 40  # 8 satr x 5 tugma
 
 def _build_emoji_pack_page(items: list, pack_name: str, page: int):
@@ -1757,7 +1770,13 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if step == "emojipack_waiting" and is_superadmin(uid):
         context.user_data.pop("step", None)
-        pack_name = text.strip().lstrip("@")
+        pack_name = _extract_pack_name(text)
+        if not pack_name:
+            await update.message.reply_text(
+                "❌ Pack nomini aniqlab bo'lmadi. Shunchaki nomining o'zini "
+                "(masalan `developeremojis`) yoki to'liq havolani yuboring.",
+                parse_mode="Markdown")
+            return
         try:
             ss = await context.bot.get_sticker_set(pack_name)
         except Exception as e:
@@ -1775,6 +1794,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text_out, kb = _build_emoji_pack_page(items, pack_name, 0)
         await update.message.reply_text(text_out, parse_mode="Markdown", reply_markup=kb)
         return
+
 
     if step == "acadm_waiting_user" and is_superadmin(uid):
         target_chat = context.user_data.pop("acadm_chat", None)

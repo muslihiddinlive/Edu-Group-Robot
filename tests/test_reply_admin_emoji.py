@@ -401,3 +401,43 @@ async def test_editadmin_toggle_can_add_admins_off(bot, ctx):
     adm = bot.load_admins()
     assert adm["333"]["can_add_admins"] is False
 
+
+
+# ══════════════════════════════════════════════════════
+# Pack-name extraction from pasted URLs (bug found via screenshot)
+# ══════════════════════════════════════════════════════
+
+def test_extract_pack_name_plain(bot):
+    assert bot._extract_pack_name("developeremojis") == "developeremojis"
+
+
+def test_extract_pack_name_with_at(bot):
+    assert bot._extract_pack_name("@developeremojis") == "developeremojis"
+
+
+def test_extract_pack_name_full_addemoji_url(bot):
+    assert bot._extract_pack_name("https://t.me/addemoji/developeremojis") == "developeremojis"
+
+
+def test_extract_pack_name_full_addstickers_url(bot):
+    assert bot._extract_pack_name("https://t.me/addstickers/MyPack") == "MyPack"
+
+
+def test_extract_pack_name_no_scheme(bot):
+    assert bot._extract_pack_name("t.me/addemoji/developeremojis") == "developeremojis"
+
+
+def test_extract_pack_name_invalid_returns_none(bot):
+    assert bot._extract_pack_name("bu umuman link emas!!") is None
+
+
+@pytest.mark.asyncio
+async def test_emojipack_accepts_pasted_full_url(bot, ctx):
+    ctx.user_data["step"] = "emojipack_waiting"
+    ctx.bot.get_sticker_set = AsyncMock(return_value=FakeStickerSet([
+        FakeSticker("🔥", "111"),
+    ]))
+    update = FUpdate(SUPERADMIN_ID, "https://t.me/addemoji/developeremojis")
+    await bot.handle_text(update, ctx)
+    ctx.bot.get_sticker_set.assert_awaited_once_with("developeremojis")
+    assert update.message.reply_markups
