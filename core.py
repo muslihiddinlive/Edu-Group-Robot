@@ -164,6 +164,7 @@ CONFIG_FILE    = "config.json"
 BADWORDS_FILE  = "badwords.json"
 USERS_FILE     = "users.json"
 INCIDENTS_FILE = "incidents.json"
+PAYMENTS_FILE  = "processed_payments.json"
 MAX_MSG_HISTORY = 10000
 EXPORT_VERSION  = 5
 BROADCAST_READY = "✅ Tayyor — Yuborishni boshlash"
@@ -266,12 +267,26 @@ def mark_changed():
 def _jload(path: str) -> dict:
     if not os.path.exists(path):
         return {}
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        # Fayl yarim yozilgan holda qolgan bo'lishi mumkin (masalan process
+        # yozish paytida o'chib qolsa). Butun botni yiqitish o'rniga bo'sh
+        # dict qaytaramiz va logga yozamiz — auto-restore keyingi ishga
+        # tushishda Telegram'dagi backup'dan tiklaydi.
+        logger.error(f"JSON o'qishda xato ({path}): {e} — bo'sh dict qaytarilmoqda")
+        return {}
 
 def _jsave(path: str, data):
-    with open(path, "w", encoding="utf-8") as f:
+    # Atomik yozish: avval vaqtinchalik faylga yozamiz, keyin os.replace()
+    # bilan almashtiramiz. Bu process yozish o'rtasida o'chib qolsa ham
+    # (Render restart/OOM/sleep-wake) asosiy fayl hech qachon yarim
+    # yozilgan holatda qolmasligini kafolatlaydi.
+    tmp = f"{path}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
     mark_changed()
 
 # ── Topics ──
@@ -295,8 +310,11 @@ def load_topic(name: str) -> dict | None:
 
 def save_topic(data: dict):
     _ensure_topics_dir()
-    with open(topic_path(data["name"]), "w", encoding="utf-8") as f:
+    p   = topic_path(data["name"])
+    tmp = f"{p}.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, p)
     mark_changed()
 
 def all_topics() -> list:
@@ -304,8 +322,13 @@ def all_topics() -> list:
     out = []
     for fn in sorted(os.listdir(TOPICS_DIR)):
         if fn.endswith(".json"):
-            with open(os.path.join(TOPICS_DIR, fn), "r", encoding="utf-8") as f:
-                out.append(json.load(f))
+            fp = os.path.join(TOPICS_DIR, fn)
+            try:
+                with open(fp, "r", encoding="utf-8") as f:
+                    out.append(json.load(f))
+            except (json.JSONDecodeError, OSError) as e:
+                # Bitta buzilgan topic fayli butun ro'yxatni yiqitmasin
+                logger.error(f"Topic o'qishda xato ({fp}): {e} — o'tkazib yuborildi")
     return out
 
 def count_topics() -> int:
@@ -369,6 +392,20 @@ def get_incident(iid: int):
         if it["id"] == iid:
             return it
     return None
+
+# ── Qayta ishlangan to'lovlar (duplicate webhook himoyasi) ──
+def load_processed_payments() -> set:
+    d = _jload(PAYMENTS_FILE)
+    return set(d.get("charge_ids", []))
+
+def is_payment_processed(charge_id: str) -> bool:
+    return charge_id in load_processed_payments()
+
+def mark_payment_processed(charge_id: str):
+    ids = load_processed_payments()
+    ids.add(charge_id)
+    # Cheksiz o'smasligi uchun oxirgi 5000 tasini saqlaymiz
+    _jsave(PAYMENTS_FILE, {"charge_ids": list(ids)[-5000:]})
 
 # ── Users ──
 def load_users() -> dict:
@@ -2130,12 +2167,36 @@ async def cmd_successful_payment(update: Update, context: ContextTypes.DEFAULT_T
     if len(parts) < 3:
         return
 
-    tarif    = parts[1]
-    buyer_id = int(parts[2])
+    tarif = parts[1]
+    try:
+        payload_uid = int(parts[2])
+    except ValueError:
+        payload_uid = uid
+
+    # --- Duplicate-himoya: Telegram webhook ba'zan bitta update'ni 2 marta
+    # yuborishi mumkin (masalan sleep/wake payti). Bir xil to'lovni qayta
+    # ishlab, tarifni ikki marta faollashtirib yubormaslik uchun charge_id
+    # bo'yicha tekshiramiz. ---
+    charge_id = payment.telegram_payment_charge_id
+    if is_payment_processed(charge_id):
+        logger.warning(f"Takroriy successful_payment e'tiborsiz qoldirildi: {charge_id}")
+        return
+    mark_payment_processed(charge_id)
+
+    # --- Har doim HAQIQIY to'lovchiga (update.effective_user) kredit
+    # beramiz, payload'dagi ID'ga emas. Sabab: agar invoice xabari boshqa
+    # userga forward qilinib to'lansa, payload_uid asl "buyurtmachi"ni
+    # ko'rsatadi, lekin u ro'yxatdan o'tmagan bo'lsa users[k] KeyError
+    # bilan yiqilardi. Haqiqiy to'lovchi esa har doim to'liq Telegram User
+    # obyektiga ega bo'lgani uchun xavfsiz ro'yxatdan o'tkazish mumkin. ---
+    if payload_uid != uid:
+        logger.warning(
+            f"To'lov: payload_uid ({payload_uid}) haqiqiy to'lovchidan "
+            f"({uid}) farq qiladi — kredit haqiqiy to'lovchiga beriladi.")
 
     # Tarifni beramiz (30 kun)
     users = load_users()
-    k     = str(buyer_id)
+    k     = str(uid)
     if k not in users:
         register_user(user)
         users = load_users()

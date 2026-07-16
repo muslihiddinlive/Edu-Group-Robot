@@ -3495,7 +3495,7 @@ async def run_bot():
         drop_pending_updates=True,
         allowed_updates=Update.ALL_TYPES,
     )
-    logger.info(f"Webhook: {webhook_url}")
+    logger.info(f"Webhook: {webhook_url.replace(BOT_TOKEN, '***')}")
 
     if app.job_queue:
         app.job_queue.run_daily(
