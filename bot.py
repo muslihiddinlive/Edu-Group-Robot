@@ -1731,7 +1731,7 @@ async def run_bot():
 
     app = Application.builder().token(BOT_TOKEN).build()
 
-    core._BOT_REF = app.bot
+    backup._BOT_REF = app.bot
 
     cmds = [
         ("start",           cmd_start),
@@ -1835,7 +1835,7 @@ async def run_bot():
     await auto_restore_on_startup(app.bot)
     await sync_bot_commands(app.bot)
 
-    if not core.get_supergroup_id():
+    if not backup.get_supergroup_id():
         try:
             await app.bot.send_message(
                 SUPERADMIN,
