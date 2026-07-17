@@ -560,7 +560,7 @@ async def test_control_group_roundtrip(bot, monkeypatch):
     """CONTROL_GROUP_ID sozlangan bo'lsa, ma'lumot pin xabar orqali
     to'g'ri yozilishi/o'qilishi va Render disk tozalanishidan keyin ham
     (config.json'siz) tiklanishi kerak."""
-    monkeypatch.setattr(bot.core, "CONTROL_GROUP_ID", -100555)
+    monkeypatch.setattr(bot.backup, "CONTROL_GROUP_ID", -100555)
 
     class FakeControlBot:
         def __init__(self):

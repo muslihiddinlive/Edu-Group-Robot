@@ -159,7 +159,7 @@ async def test_bulkq_invalid_lines_reported_clearly(bot, ctx):
 @pytest.mark.asyncio
 async def test_bulkq_respects_question_limit_and_skips_rest(bot, ctx, monkeypatch):
     _mk_topic(bot)
-    monkeypatch.setattr(bot, "get_admin_max_questions", lambda uid: 2)
+    monkeypatch.setattr(bot.admin, "get_admin_max_questions", lambda uid: 2)
     ctx.user_data.update({"topic_name": "english"})
     text = "a - 1\nb - 2\nc - 3\nd - 4"
     update = FakeUpdate(SUPERADMIN_ID, text)
@@ -334,8 +334,8 @@ class FakeExportBot:
 
 @pytest.mark.asyncio
 async def test_export_then_restore_roundtrip_preserves_data(bot, monkeypatch):
-    monkeypatch.setattr(bot.core, "CONTROL_GROUP_ID", -100777)
-    monkeypatch.setattr(bot.core, "_SUPERGROUP_ID_CACHE", -100888)
+    monkeypatch.setattr(bot.backup, "CONTROL_GROUP_ID", -100777)
+    monkeypatch.setattr(bot.backup, "_SUPERGROUP_ID_CACHE", -100888)
     _mk_topic(bot, questions=[{"question": "x", "answer": "y", "alternatives": []}])
     bot.save_admins({"111": {"added_by": SUPERADMIN_ID}})
     bot.save_users({"222": {"tarif": "vip", "referral_count": 3}})

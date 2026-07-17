@@ -48,7 +48,7 @@ async def test_sync_bot_commands_sets_short_default_and_full_admin_lists(bot):
 @pytest.mark.asyncio
 async def test_save_admins_auto_resyncs_commands(bot, monkeypatch):
     fb = FakeBot()
-    monkeypatch.setattr(bot.core, "_BOT_REF", fb)
+    monkeypatch.setattr(bot.backup, "_BOT_REF", fb)
     bot.save_admins({"222": {"added_by": SUPERADMIN_ID}})
     await asyncio.sleep(0.05)  # background task tugashini kutamiz
     chat_targets = {c[0].chat_id for c in fb.calls if isinstance(c[0], bot.BotCommandScopeChat)}
