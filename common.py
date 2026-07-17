@@ -25,6 +25,8 @@ from telegram.ext import (
 
 TZ = timezone(timedelta(hours=5))  # UTC+5 — Toshkent
 
+logging.basicConfig(level=logging.INFO,
+                    format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
 def _require_env(key: str) -> str:

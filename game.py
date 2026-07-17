@@ -35,6 +35,8 @@ ACCESS_LABELS = {
 def _ensure_topics_dir():
     os.makedirs(TOPICS_DIR, exist_ok=True)
 
+os.makedirs(TOPICS_DIR, exist_ok=True)  # import vaqtida ham papka tayyor bo'lsin
+
 def topic_path(name: str) -> str:
     return os.path.join(TOPICS_DIR, f"{name.lower()}.json")
 
