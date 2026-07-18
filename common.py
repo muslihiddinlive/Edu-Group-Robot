@@ -213,6 +213,7 @@ def format_user_info(user=None, uid: int = None) -> str:
 
     from tariffs import get_user_tarif, TARIF_NAMES  # aylanma importdan qochish uchun
     from game import get_user_topic_names
+    from admin import load_incidents  # aylanma importdan qochish uchun
     tarif = get_user_tarif(uid) if uid else "—"
     tarif_name = TARIF_NAMES.get(tarif, tarif)
     topic_names  = get_user_topic_names(uid) if uid else []
@@ -222,6 +223,22 @@ def format_user_info(user=None, uid: int = None) -> str:
     joined = u_data.get("joined_at", "—") if u_data else "—"
     ref_by = u_data.get("referral_by", "—") if u_data else "—"
     subscribed = "✅" if u_data and u_data.get("is_subscribed") else "❌"
+
+    # Shu user referal havolasi orqali kimlarni taklif qilgani
+    invited = []
+    if uid:
+        all_users = load_users()
+        for other_uid, other in all_users.items():
+            if str(other.get("referral_by")) == str(uid):
+                oname = other.get("first_name") or "Anonim"
+                ouser = f"@{other['username']}" if other.get("username") else other_uid
+                invited.append(f"{mdesc(oname)} ({mdesc(ouser)})")
+    invited_line = "\n    • " + "\n    • ".join(invited) if invited else " —"
+
+    # So'kinish/moderatsiya ogohlantirishlari soni
+    warn_count = 0
+    if uid:
+        warn_count = sum(1 for it in load_incidents() if str(it.get("offender_id")) == str(uid))
 
     return (
         f"👤 *Foydalanuvchi ma'lumotlari:*\n\n"
@@ -236,8 +253,9 @@ def format_user_info(user=None, uid: int = None) -> str:
         f"📅 Qo'shilgan: `{joined}`\n"
         f"💎 Tarif: *{tarif_name}*\n"
         f"📁 Topiclar ({topics_count}): {topics_line}\n"
-        f"👥 Referallar: {ref_count}\n"
+        f"👥 Referallar: {ref_count}{invited_line}\n"
         f"🔗 Referral by: `{ref_by}`\n"
+        f"⚠️ Ogohlantirishlar: {warn_count}\n"
         f"📢 Obuna: {subscribed}"
     )
 

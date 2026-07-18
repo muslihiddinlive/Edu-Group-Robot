@@ -147,6 +147,20 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text(f"❌ Yuborib bo'lmadi:\n`{e}`", parse_mode="Markdown")
         return
 
+    if step == "user_msg_waiting" and is_superadmin(uid):
+        target_uid = context.user_data.pop("user_msg_uid", None)
+        context.user_data.clear()
+        if target_uid:
+            try:
+                await context.bot.copy_message(
+                    chat_id=target_uid,
+                    from_chat_id=update.effective_chat.id,
+                    message_id=update.message.message_id)
+                await update.message.reply_text(f"✅ ID `{target_uid}` ga yuborildi!", parse_mode="Markdown")
+            except Exception as e:
+                await update.message.reply_text(f"❌ Yuborib bo'lmadi (user botni bloklagan bo'lishi mumkin):\n`{e}`", parse_mode="Markdown")
+        return
+
     if step == "contact_waiting" and not is_admin_or_superadmin(uid):
         await _relay(update, context)
         return
@@ -566,6 +580,20 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     step = context.user_data.get("step")
 
+    if step == "user_msg_waiting" and is_superadmin(uid):
+        target_uid = context.user_data.pop("user_msg_uid", None)
+        context.user_data.clear()
+        if target_uid:
+            try:
+                await context.bot.copy_message(
+                    chat_id=target_uid,
+                    from_chat_id=update.effective_chat.id,
+                    message_id=update.message.message_id)
+                await update.message.reply_text(f"✅ ID `{target_uid}` ga yuborildi!", parse_mode="Markdown")
+            except Exception as e:
+                await update.message.reply_text(f"❌ Yuborib bo'lmadi (user botni bloklagan bo'lishi mumkin):\n`{e}`", parse_mode="Markdown")
+        return
+
     if step == "sendas_waiting" and is_superadmin(uid):
         target_cid = context.user_data.pop("sendas_chat", None)
         context.user_data.clear()
@@ -732,9 +760,21 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         kb = InlineKeyboardMarkup([
             [IKB("💎 Tarif berish", callback_data=f"grant_tarif:{target_uid}:{back_page}")],
             [IKB("🎁 Referral berish", callback_data=f"grant_ref:{target_uid}:{back_page}")],
+            [IKB("✍️ Xabar yozish", callback_data=f"user_msg:{target_uid}:{back_page}")],
             [IKB("⬅️ Orqaga", callback_data=f"userslist:{back_page}")],
         ])
         await q.edit_message_text(text, parse_mode="Markdown", reply_markup=kb)
+        return
+
+    if data.startswith("user_msg:"):
+        if not is_superadmin(uid): return
+        _, target_uid, back_page = data.split(":")
+        context.user_data.clear()
+        context.user_data["step"]          = "user_msg_waiting"
+        context.user_data["user_msg_uid"]  = int(target_uid)
+        context.user_data["user_msg_back"] = int(back_page)
+        await q.edit_message_text(
+            f"✍️ ID `{target_uid}` ga xabar yuboring:\n\n⏹ /cancel", parse_mode="Markdown")
         return
 
     if data.startswith("grant_tarif:"):

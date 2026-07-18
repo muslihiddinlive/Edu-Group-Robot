@@ -1212,6 +1212,7 @@ async def cmd_userinfo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     kb = InlineKeyboardMarkup([
         [IKB("💎 Tarif berish", callback_data=f"grant_tarif:{uid_t}:0")],
         [IKB("🎁 Referral berish", callback_data=f"grant_ref:{uid_t}:0")],
+        [IKB("✍️ Xabar yozish", callback_data=f"user_msg:{uid_t}:0")],
     ])
     await update.message.reply_text(text, parse_mode="Markdown", reply_markup=kb)
 
