@@ -136,12 +136,13 @@ async def cmd_newgame(update: Update, context: ContextTypes.DEFAULT_TYPE):
         g.update({"active": True, "mode": "admin", "topic": None, "emoji": "",
                   "questions": [], "asked": 0, "current": None,
                   "current_msg_id": None, "scores": {}, "waiting": False,
-                  "time_limit": None, "admin_ranks": [],
+                  "time_limit": None, "admin_ranks": [], "admin_scored_msgs": [],
                   "started_by": update.effective_user.id})
         await update.message.reply_text(
             "🎮 *ADMIN O'YINI BOSHLANDI!*\n\n"
-            "✅ ni biror xabarga *javob* tariqasida yuboring (yoki "
-            "`✅ @username`) — o'sha kishi keyingi o'ringa yoziladi.\n\n"
+            "Savolni o'zingiz istalgan formatda yozing. To'g'ri javob "
+            "bergan kishining xabariga ✅ ni *javob* tariqasida yuboring "
+            "(yoki `✅ @username`) — unga 1 ball qo'shiladi.\n\n"
             "⏹ Tugatish: `/endgame`", parse_mode="Markdown")
         return
 
@@ -179,7 +180,7 @@ async def cmd_newgame(update: Update, context: ContextTypes.DEFAULT_TYPE):
     g.update({"active": True, "mode": mode, "topic": tn, "emoji": t["emoji"],
               "questions": qs, "asked": 0, "current": None, "current_reversed": False,
               "current_msg_id": None, "scores": {}, "waiting": False,
-              "time_limit": time_limit, "admin_ranks": [],
+              "time_limit": time_limit, "admin_ranks": [], "admin_scored_msgs": [],
               "started_by": update.effective_user.id})
     mode_label = {"standard": "", "lang": " 🔤 Lang mode",
                   "speed": f" ⚡ Speed mode" + (f" ({args[2]})" if time_limit else "")}[mode]
@@ -287,7 +288,7 @@ def get_game(chat_id: int) -> dict:
             "scores": {}, "waiting": False,
             "time_limit": None,
             # Admin (module 1) uchun:
-            "admin_ranks": [], "started_by": None,
+            "admin_ranks": [], "admin_scored_msgs": [], "started_by": None,
         }
     return games[chat_id]
 
@@ -465,26 +466,15 @@ async def _check_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await send_question(cid, context)
         return
 
-    # Noto'g'ri javob
-    if mode == "speed":
-        g["waiting"] = True
-        alt_t = f"\n➕ Shuningdek: _{mdesc(', '.join(alts))}_" if alts else ""
-        await update.message.reply_text(
-            f"❌ *XATO!*\n✅ To'g'ri: *{mdesc(correct)}*{alt_t}\n\n⏩ Keyingi...",
-            parse_mode="Markdown")
-        g["waiting"] = False
-        if g["asked"] >= len(g["questions"]):
-            await finish_game(cid, context)
-        else:
-            await send_question(cid, context)
-    else:
-        # Standard / Lang: to'g'ri javob aytilmaydi, xuddi shu savol
-        # kutishda davom etadi (keyingisiga o'tmaydi). Foydalanuvchi
-        # asl savolga HAM, shu "Noto'g'ri" xabariga HAM javoban yozsa
-        # qabul qilinishi uchun uning message_id'sini ham eslab qolamiz.
-        sent = await update.message.reply_text(
-            "❌ *Noto'g'ri!* Yana urinib ko'ring 🔁", parse_mode="Markdown")
-        g["last_wrong_msg_id"] = sent.message_id
+    # Noto'g'ri javob — hech qaysi rejimda javob ochilmaydi va keyingisiga
+    # o'tilmaydi. Speed mode faqat vaqt tugagach (_speed_timeout) o'tadi.
+    # Standard/Lang uchun "Keyingisi" tugmasi qo'yiladi — hech kim
+    # topolmasa, admin bosib o'tkazib yubora oladi.
+    sent = await update.message.reply_text(
+        "❌ *Noto'g'ri!* Yana urinib ko'ring 🔁", parse_mode="Markdown",
+        reply_markup=(None if mode == "speed" else
+                      InlineKeyboardMarkup([[IKB("⏩ Keyingisi", callback_data=f"skipq:{cid}")]])))
+    g["last_wrong_msg_id"] = sent.message_id
 
 async def finish_game(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
     g = get_game(chat_id)
@@ -587,16 +577,20 @@ async def handle_admin_mode_message(update: Update, context: ContextTypes.DEFAUL
             "`✅ @username` shaklida yozing.", parse_mode="Markdown")
         return True
 
-    if any(r["uid"] == winner_uid for r in g["admin_ranks"]):
-        await msg.reply_text("⚠️ Bu kishi allaqachon belgilangan!")
+    if target_msg_id is not None and target_msg_id in g["admin_scored_msgs"]:
+        await msg.reply_text("⚠️ Bu xabarga allaqachon bal berilgan!")
         return True
 
-    pos = len(g["admin_ranks"]) + 1
-    g["admin_ranks"].append({"uid": winner_uid, "name": winner_name,
-                              "username": winner_username})
+    uid_s = str(winner_uid)
+    if uid_s not in g["scores"]:
+        g["scores"][uid_s] = {"name": winner_name, "count": 0}
+    g["scores"][uid_s]["count"] += 1
+    ball = g["scores"][uid_s]["count"]
+    if target_msg_id is not None:
+        g["admin_scored_msgs"].append(target_msg_id)
     dname = mdesc(get_display_name(winner_uid, winner_name))
     await context.bot.send_message(
-        chat.id, f"🎉 Tabriklaymiz, {dname}! Siz *{pos}*-o'rinni egalladingiz!",
+        chat.id, f"🎉 Tabriklaymiz, {dname}! +1 ball (jami: *{ball}* ball)",
         parse_mode="Markdown")
     if target_msg_id:
         try:
@@ -612,17 +606,17 @@ async def _finish_admin_game(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
     (linked) kanalga, aks holda guruhning o'ziga yuboradi."""
     g = get_game(chat_id)
     g["active"] = False
-    ranks = g.get("admin_ranks", [])
-    if not ranks:
+    scores = g.get("scores", {})
+    if not scores:
         await context.bot.send_message(chat_id, "📊 O'yin tugadi. Hech kim belgilanmadi.")
         return
+    ss     = sorted(scores.items(), key=lambda x: x[1]["count"], reverse=True)
     medals = ["🥇", "🥈", "🥉"]
     lines  = ["🏆 *NATIJALAR* 🏆\n"]
-    for i, r in enumerate(ranks):
+    for i, (uid_s, d) in enumerate(ss):
         m     = medals[i] if i < 3 else f"{i+1}."
-        dname = mdesc(get_display_name(r["uid"], r["name"]))
-        uname = f" (@{mdesc(r['username'])})" if r.get("username") else ""
-        lines.append(f"{m} {dname}{uname} — {i+1}-o'rin 🎉")
+        dname = mdesc(get_display_name(int(uid_s), d["name"]))
+        lines.append(f"{m} {dname} — {d['count']} ball")
     text   = "\n".join(lines)
     target = chat_id
     try:
@@ -641,4 +635,6 @@ async def _finish_admin_game(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 pass
     g["admin_ranks"] = []
+    g["admin_scored_msgs"] = []
+    g["scores"] = {}
 

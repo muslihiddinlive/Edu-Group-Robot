@@ -706,6 +706,36 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid  = q.from_user.id
     data = q.data
 
+    # ── O'yin: "Keyingisi" (hech kim topolmasa, admin o'tkazib yuborishi) ──
+    if data.startswith("skipq:"):
+        if not is_admin_or_superadmin(uid):
+            await q.answer("⚠️ Faqat admin o'tkaza oladi.", show_alert=True)
+            return
+        chat_id = int(data.split(":", 1)[1])
+        g = get_game(chat_id)
+        if not g["active"] or g.get("mode") == "admin" or g["waiting"]:
+            return
+        g["waiting"] = True
+        try:
+            await q.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        if g["current"] is None:
+            correct = "—"
+        elif g.get("mode") == "lang" and g.get("current_reversed"):
+            correct = g["current"]["question"]
+        else:
+            correct = g["current"]["answer"]
+        await context.bot.send_message(
+            chat_id, f"⏩ *O'tkazib yuborildi.*\n✅ To'g'ri javob: *{mdesc(correct)}*",
+            parse_mode="Markdown")
+        g["waiting"] = False
+        if g["asked"] >= len(g["questions"]):
+            await finish_game(chat_id, context)
+        else:
+            await send_question(chat_id, context)
+        return
+
     # ── Emoji pack picker ──
     if data.startswith("epage:"):
         if not is_superadmin(uid): return

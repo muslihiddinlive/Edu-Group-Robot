@@ -243,7 +243,7 @@ async def test_standard_mode_wrong_answer_waits_no_advance(bot, ctx, fakebot):
 
 
 @pytest.mark.asyncio
-async def test_speed_mode_wrong_answer_advances(bot, ctx, fakebot):
+async def test_speed_mode_wrong_answer_does_not_advance(bot, ctx, fakebot):
     _make_topic(bot)
     g = bot.get_game(-100124)
     q1 = {"question": "apple", "answer": "olma", "alternatives": []}
@@ -257,10 +257,12 @@ async def test_speed_mode_wrong_answer_advances(bot, ctx, fakebot):
     update = FUpdate(111, "notogri javob", chat=FChat(chat_id=-100124), reply_to=q_msg)
     ctx.bot = fakebot
     await bot._check_answer(update, ctx)
-    # Speed mode: xato bo'lsa ham keyingi savolga o'tishi kerak
-    assert g["asked"] == 2
-    assert g["current"] is q2
-    assert any("XATO" in r for r in update.message.replies)
+    # Speed mode: xato bo'lsa ham KEYINGI savolga o'TMAYDI — faqat vaqt
+    # tugagach (_speed_timeout) o'tadi. Javob ham ochilmaydi.
+    assert g["asked"] == 1
+    assert g["current"] is q1
+    assert any("Noto'g'ri" in r for r in update.message.replies)
+    assert not any("olma" in r for r in update.message.replies)
 
 
 @pytest.mark.asyncio
@@ -338,10 +340,10 @@ def test_parse_duration_units(bot):
 # ══════════════════════════════════════════════════════
 
 @pytest.mark.asyncio
-async def test_admin_mode_reply_checkmark_ranks_winner(bot, ctx, fakebot):
+async def test_admin_mode_reply_checkmark_gives_point(bot, ctx, fakebot):
     chat = FChat(chat_id=-100200)
     g = bot.get_game(chat.id)
-    g.update({"active": True, "mode": "admin", "admin_ranks": []})
+    g.update({"active": True, "mode": "admin", "scores": {}, "admin_scored_msgs": []})
     fakebot.chat_members[(chat.id, SUPERADMIN_ID)] = "creator"
     winner = FUser(555, username="Muslihiddin", first_name="Muslihiddin")
     win_msg = FMessage(text="mening javobim", chat=chat, user=winner)
@@ -349,7 +351,8 @@ async def test_admin_mode_reply_checkmark_ranks_winner(bot, ctx, fakebot):
     ctx.bot = fakebot
     handled = await bot.handle_admin_mode_message(update, ctx)
     assert handled is True
-    assert g["admin_ranks"][0]["uid"] == 555
+    assert g["scores"]["555"]["count"] == 1
+    assert win_msg.message_id in g["admin_scored_msgs"]
     assert any("Tabriklaymiz" in s["text"] for s in fakebot.sent)
     assert (chat.id, win_msg.message_id, "🎉") in fakebot.reactions
 
@@ -358,48 +361,65 @@ async def test_admin_mode_reply_checkmark_ranks_winner(bot, ctx, fakebot):
 async def test_admin_mode_checkmark_with_username(bot, ctx, fakebot):
     chat = FChat(chat_id=-100201)
     g = bot.get_game(chat.id)
-    g.update({"active": True, "mode": "admin", "admin_ranks": []})
+    g.update({"active": True, "mode": "admin", "scores": {}, "admin_scored_msgs": []})
     bot.save_users({"777": {"username": "Muslihiddin", "first_name": "Muslihiddin", "tarif": "free"}})
     update = FUpdate(SUPERADMIN_ID, "✅ @Muslihiddin", chat=chat)
     ctx.bot = fakebot
     handled = await bot.handle_admin_mode_message(update, ctx)
     assert handled is True
-    assert g["admin_ranks"][0]["uid"] == 777
+    assert g["scores"]["777"]["count"] == 1
 
 
 @pytest.mark.asyncio
 async def test_admin_mode_plain_checkmark_asks_for_reply(bot, ctx, fakebot):
     chat = FChat(chat_id=-100202)
     g = bot.get_game(chat.id)
-    g.update({"active": True, "mode": "admin", "admin_ranks": []})
+    g.update({"active": True, "mode": "admin", "scores": {}, "admin_scored_msgs": []})
     update = FUpdate(SUPERADMIN_ID, "✅", chat=chat)
     ctx.bot = fakebot
     handled = await bot.handle_admin_mode_message(update, ctx)
     assert handled is True
-    assert g["admin_ranks"] == []
+    assert g["scores"] == {}
     assert any("javob" in r for r in update.message.replies)
 
 
 @pytest.mark.asyncio
-async def test_admin_mode_duplicate_winner_rejected(bot, ctx, fakebot):
+async def test_admin_mode_same_message_twice_rejected(bot, ctx, fakebot):
+    """Bitta xabarga 2 marta bal berib bo'lmasligi kerak."""
     chat = FChat(chat_id=-100203)
     g = bot.get_game(chat.id)
-    g.update({"active": True, "mode": "admin",
-              "admin_ranks": [{"uid": 555, "name": "X", "username": None}]})
     winner = FUser(555, first_name="X")
     win_msg = FMessage(text="a", chat=chat, user=winner)
+    g.update({"active": True, "mode": "admin", "scores": {"555": {"name": "X", "count": 1}},
+              "admin_scored_msgs": [win_msg.message_id]})
     update = FUpdate(SUPERADMIN_ID, "✅", chat=chat, reply_to=win_msg)
     ctx.bot = fakebot
     await bot.handle_admin_mode_message(update, ctx)
-    assert len(g["admin_ranks"]) == 1
+    assert g["scores"]["555"]["count"] == 1  # o'zgarmadi
     assert any("allaqachon" in r for r in update.message.replies)
+
+
+@pytest.mark.asyncio
+async def test_admin_mode_same_person_different_message_allowed(bot, ctx, fakebot):
+    """Xuddi shu odam BOSHQA xabar bilan yana bal ola olishi kerak."""
+    chat = FChat(chat_id=-100210)
+    g = bot.get_game(chat.id)
+    winner = FUser(555, first_name="X")
+    old_msg = FMessage(text="birinchi javob", chat=chat, user=winner)
+    g.update({"active": True, "mode": "admin", "scores": {"555": {"name": "X", "count": 1}},
+              "admin_scored_msgs": [old_msg.message_id]})
+    new_msg = FMessage(text="ikkinchi javob", chat=chat, user=winner)
+    update = FUpdate(SUPERADMIN_ID, "✅", chat=chat, reply_to=new_msg)
+    ctx.bot = fakebot
+    await bot.handle_admin_mode_message(update, ctx)
+    assert g["scores"]["555"]["count"] == 2  # ball qo'shildi
 
 
 @pytest.mark.asyncio
 async def test_admin_mode_non_admin_checkmark_ignored(bot, ctx, fakebot):
     chat = FChat(chat_id=-100204)
     g = bot.get_game(chat.id)
-    g.update({"active": True, "mode": "admin", "admin_ranks": []})
+    g.update({"active": True, "mode": "admin", "scores": {}, "admin_scored_msgs": []})
     fakebot.chat_members[(chat.id, 222)] = "member"
     winner = FUser(555, first_name="X")
     win_msg = FMessage(text="a", chat=chat, user=winner)
@@ -407,7 +427,7 @@ async def test_admin_mode_non_admin_checkmark_ignored(bot, ctx, fakebot):
     ctx.bot = fakebot
     handled = await bot.handle_admin_mode_message(update, ctx)
     assert handled is False
-    assert g["admin_ranks"] == []
+    assert g["scores"] == {}
 
 
 @pytest.mark.asyncio
@@ -415,8 +435,7 @@ async def test_finish_admin_game_posts_to_group_when_no_linked_channel(bot, ctx,
     chat_id = -100205
     g = bot.get_game(chat_id)
     g.update({"active": True, "mode": "admin",
-              "admin_ranks": [{"uid": 1, "name": "Ali", "username": "ali_u"},
-                               {"uid": 2, "name": "Vali", "username": None}]})
+              "scores": {"1": {"name": "Ali", "count": 2}, "2": {"name": "Vali", "count": 1}}})
     ctx.bot = fakebot
     await bot._finish_admin_game(chat_id, ctx)
     assert g["active"] is False
@@ -431,11 +450,50 @@ async def test_finish_admin_game_posts_to_linked_channel(bot, ctx, fakebot):
     fakebot.linked_chat_id[chat_id] = -100999
     g = bot.get_game(chat_id)
     g.update({"active": True, "mode": "admin",
-              "admin_ranks": [{"uid": 1, "name": "Ali", "username": None}]})
+              "scores": {"1": {"name": "Ali", "count": 3}}})
     ctx.bot = fakebot
     await bot._finish_admin_game(chat_id, ctx)
     posted_channel = [s for s in fakebot.sent if s["chat_id"] == -100999]
     assert posted_channel
+
+
+@pytest.mark.asyncio
+async def test_skipq_callback_admin_advances_question(bot, ctx, fakebot):
+    fakebot.chat_members[(-100220, SUPERADMIN_ID)] = "creator"
+    g = bot.get_game(-100220)
+    q1 = {"question": "apple", "answer": "olma", "alternatives": []}
+    q2 = {"question": "orange", "answer": "apelsin", "alternatives": []}
+    g.update({"active": True, "mode": "standard", "topic": "english", "emoji": "📘",
+              "questions": [q1, q2], "asked": 1, "current": q1,
+              "current_msg_id": 60, "scores": {}, "waiting": False,
+              "current_reversed": False, "time_limit": None})
+    ctx.bot = fakebot
+    cq = SimpleNamespace(
+        data="skipq:-100220", from_user=SimpleNamespace(id=SUPERADMIN_ID),
+        answer=AsyncMock(), edit_message_reply_markup=AsyncMock())
+    update = SimpleNamespace(callback_query=cq)
+    await bot.callback_handler(update, ctx)
+    assert g["asked"] == 2
+    assert g["current"] is q2
+    assert any("tkazib yuborildi" in s["text"] for s in fakebot.sent)
+
+
+@pytest.mark.asyncio
+async def test_skipq_callback_non_admin_rejected(bot, ctx, fakebot):
+    g = bot.get_game(-100221)
+    q1 = {"question": "apple", "answer": "olma", "alternatives": []}
+    g.update({"active": True, "mode": "standard", "topic": "english", "emoji": "📘",
+              "questions": [q1], "asked": 1, "current": q1,
+              "current_msg_id": 60, "scores": {}, "waiting": False,
+              "current_reversed": False, "time_limit": None})
+    ctx.bot = fakebot
+    cq = SimpleNamespace(
+        data="skipq:-100221", from_user=SimpleNamespace(id=222222),
+        answer=AsyncMock())
+    update = SimpleNamespace(callback_query=cq)
+    await bot.callback_handler(update, ctx)
+    assert g["asked"] == 1
+    assert g["current"] is q1
 
 
 @pytest.mark.asyncio
