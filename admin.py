@@ -1441,6 +1441,13 @@ async def cmd_listbadwords(update: Update, context: ContextTypes.DEFAULT_TYPE):
             msg += f"{i}. _{w}_\n"
     await update.message.reply_text(msg or "Bo'sh.", parse_mode="Markdown")
 
+def _badword_picker_kb(bw: dict) -> InlineKeyboardMarkup | None:
+    rows = [[IKB(f"🗑 {w}", callback_data=f"rmbw:normal:{i}")]
+            for i, w in enumerate(bw.get("words", []))]
+    rows += [[IKB(f"🗑💀 {w}", callback_data=f"rmbw:severe:{i}")]
+             for i, w in enumerate(bw.get("severe_words", []))]
+    return InlineKeyboardMarkup(rows) if rows else None
+
 async def cmd_removebadword(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_superadmin(update.effective_user.id): return
     args = context.args
@@ -1449,14 +1456,10 @@ async def cmd_removebadword(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Argumentsiz chaqirilsa — ro'yxatni tugma qilib ko'rsatamiz,
         # shunda yozishda xato/ko'rinmas belgi tufayli topilmay qolish
         # muammosi butunlay chetlab o'tiladi.
-        rows = [[IKB(f"🗑 {w}", callback_data=f"rmbw:normal:{i}")]
-                for i, w in enumerate(bw.get("words", []))]
-        rows += [[IKB(f"🗑💀 {w}", callback_data=f"rmbw:severe:{i}")]
-                 for i, w in enumerate(bw.get("severe_words", []))]
-        if not rows:
+        kb = _badword_picker_kb(bw)
+        if not kb:
             await update.message.reply_text("Ro'yxat bo'sh."); return
-        await update.message.reply_text(
-            "O'chirish uchun so'zni tanlang:", reply_markup=InlineKeyboardMarkup(rows))
+        await update.message.reply_text("O'chirish uchun so'zni tanlang:", reply_markup=kb)
         return
     word = _norm_word(" ".join(args))
     words_n  = [_norm_word(w) for w in bw["words"]]
@@ -1469,14 +1472,9 @@ async def cmd_removebadword(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"✅ Qo'pol ro'yxatdan o'chirildi: `{word}`",
                                         parse_mode="Markdown")
     else:
-        rows = [[IKB(f"🗑 {w}", callback_data=f"rmbw:normal:{i}")]
-                for i, w in enumerate(bw.get("words", []))]
-        rows += [[IKB(f"🗑💀 {w}", callback_data=f"rmbw:severe:{i}")]
-                 for i, w in enumerate(bw.get("severe_words", []))]
         await update.message.reply_text(
             f"❌ `{word}` aniq mos topilmadi. Ro'yxatdan tanlang:",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup(rows) if rows else None)
+            parse_mode="Markdown", reply_markup=_badword_picker_kb(bw))
 
 async def cmd_removewarning(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_superadmin(update.effective_user.id): return

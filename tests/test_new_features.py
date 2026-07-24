@@ -612,7 +612,34 @@ async def test_bot_admin_curse_is_ignored(bot, ctx, fakebot):
 
 
 @pytest.mark.asyncio
-async def test_removebadword_no_args_shows_picker(bot, ctx, fakebot):
+async def test_badwords_panel_shows_delete_button(bot, ctx, fakebot):
+    """'🔤 So'z filtri' paneli — 'So'z o'chirish' tugmasi orqali ro'yxat chiqishi kerak."""
+    bot.save_badwords({"words": ["rahmat"], "severe_words": [], "warnings": ["!"],
+                        "sacred_names": []})
+
+    class FakeQ:
+        def __init__(self, data):
+            self.data = data
+            self.from_user = FUser(SUPERADMIN_ID)
+            self.edits = []
+        async def answer(self, *a, **kw): pass
+        async def edit_message_text(self, text, **kw):
+            self.edits.append((text, kw.get("reply_markup")))
+
+    ctx.bot = fakebot
+
+    q1 = FakeQ("menu:badwords")
+    await bot.callback_handler(SimpleNamespace(callback_query=q1), ctx)
+    assert q1.edits and q1.edits[-1][1] is not None
+    assert q1.edits[-1][1].inline_keyboard[0][0].callback_data == "rmbw_menu"
+
+    q2 = FakeQ("rmbw_menu")
+    await bot.callback_handler(SimpleNamespace(callback_query=q2), ctx)
+    assert "rahmat" in q2.edits[-1][1].inline_keyboard[0][0].text
+    assert q2.edits[-1][1].inline_keyboard[0][0].callback_data == "rmbw:normal:0"
+
+
+
     bot.save_badwords({"words": ["rahmat"], "severe_words": [], "warnings": ["!"],
                         "sacred_names": []})
     update = FUpdate(SUPERADMIN_ID, "/removebadword", chat=FChat(chat_id=SUPERADMIN_ID))

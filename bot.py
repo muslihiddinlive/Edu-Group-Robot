@@ -706,6 +706,19 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid  = q.from_user.id
     data = q.data
 
+    # ── "So'z filtri" panelidan to'g'ridan-to'g'ri o'chirish ro'yxati ──
+    if data == "rmbw_menu":
+        if not is_superadmin(uid):
+            await q.answer("⚠️ Faqat superadmin.", show_alert=True)
+            return
+        bw = load_badwords()
+        kb = _badword_picker_kb(bw)
+        if not kb:
+            await q.edit_message_text("Ro'yxat bo'sh.")
+            return
+        await q.edit_message_text("O'chirish uchun so'zni tanlang:", reply_markup=kb)
+        return
+
     # ── Badword ro'yxatidan tugma bilan o'chirish ──
     if data.startswith("rmbw:"):
         if not is_superadmin(uid):
@@ -1004,14 +1017,20 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             bw = load_badwords()
             words   = bw.get("words", [])
             severe  = bw.get("severe_words", [])
+            btns = []
+            picker = _badword_picker_kb(bw)
+            if picker:
+                btns.append([IKB("🗑 So'z o'chirish", callback_data="rmbw_menu")])
+            btns.append([IKB("⬅️ Orqaga", callback_data="menu:back")])
             await q.edit_message_text(
                 f"🔤 *So'z filtri*\n\n"
                 f"Oddiy: {len(words)} ta\nQo'pol: {len(severe)} ta\n\n"
                 "Qo'shish: `/addbadword so'z`\n"
                 "Qo'pol qo'shish: `/addsevereword so'z`\n"
-                "Ro'yxat: `/listbadwords`",
+                "Ro'yxat: `/listbadwords`\n"
+                "O'chirish: `/removebadword so'z` yoki pastdagi tugma",
                 parse_mode="Markdown",
-                reply_markup=InlineKeyboardMarkup([[IKB("⬅️ Orqaga", callback_data="menu:back")]]))
+                reply_markup=InlineKeyboardMarkup(btns))
             return
 
         if section == "admins":
