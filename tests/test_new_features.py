@@ -149,11 +149,13 @@ class FMessage:
         self.reply_to_message = reply_to
         self.deleted = False
         self.replies = []
+        self.last_markup = None
         self.date = SimpleNamespace(timestamp=lambda: 0)
         self.sender_chat = None
 
     async def reply_text(self, text, **kw):
         self.replies.append(text)
+        self.last_markup = kw.get("reply_markup")
         return FMessage(text=text, chat=self.chat)
 
     async def delete(self):
@@ -574,26 +576,91 @@ async def test_severe_badword_kicks_regular_user(bot, ctx, fakebot):
 
 
 @pytest.mark.asyncio
-async def test_incident_dm_sent_to_creator_and_superadmin(bot, ctx, fakebot):
+async def test_incident_dm_sent_to_all_group_admins_and_superadmin(bot, ctx, fakebot):
     bot.save_badwords({"words": ["yomonsoz"], "severe_words": [], "warnings": ["!"],
                         "sacred_names": []})
     chat = FChat(chat_id=-100304)
     fakebot.chat_members[(chat.id, fakebot.id)] = "administrator"
-    fakebot.chat_admins[chat.id] = [(777, "creator")]
+    # Ikkita admin: creator VA oddiy admin — ikkalasi ham xabar olishi kerak
+    fakebot.chat_admins[chat.id] = [(777, "creator"), (888, "administrator")]
     update = FUpdate(111, "sen yomonsoz odamsan", chat=chat)
     ctx.bot = fakebot
     await bot.check_profanity(update, ctx)
-    dm_targets = {c["chat_id"] for c in fakebot.sent if c["chat_id"] in (777, SUPERADMIN_ID)}
-    assert 777 in dm_targets
-    assert SUPERADMIN_ID in dm_targets
-    # Har birida "Ko'rish" tugmasi bo'lishi kerak
+    dm_targets = {c["chat_id"] for c in fakebot.sent if c["chat_id"] in (777, 888, SUPERADMIN_ID)}
+    assert dm_targets == {777, 888, SUPERADMIN_ID}
     for s in fakebot.sent:
-        if s["chat_id"] in (777, SUPERADMIN_ID) and "So'kinish aniqlandi" in (s["text"] or ""):
-            assert s["reply_markup"].inline_keyboard[0][0].text == "🔍 Ko'rish"
+        if s["chat_id"] in (777, 888, SUPERADMIN_ID) and "So'kinish aniqlandi" in (s["text"] or ""):
+            # Kim, qaysi so'z va xabar matni ko'rinishi kerak
+            assert "yomonsoz" in s["text"]
+            assert "sen yomonsoz odamsan" in s["text"]
+            assert s["reply_markup"].inline_keyboard[0][0].text == "🔍 Batafsil"
 
 
 @pytest.mark.asyncio
-async def test_profview_callback_shows_incident_detail(bot, ctx, fakebot):
+async def test_bot_admin_curse_is_ignored(bot, ctx, fakebot):
+    """Superadmin EMAS, oddiy bot admini so'kinsa ham bot indamasligi kerak."""
+    bot.save_badwords({"words": ["yomonsoz"], "severe_words": [], "warnings": ["!"],
+                        "sacred_names": []})
+    bot.save_admins({"333": {"topic_limit": 2, "max_questions": 100, "added_by": SUPERADMIN_ID}})
+    chat = FChat(chat_id=-100310)
+    fakebot.chat_members[(chat.id, fakebot.id)] = "administrator"
+    update = FUpdate(333, "sen yomonsoz odamsan", chat=chat)
+    ctx.bot = fakebot
+    await bot.check_profanity(update, ctx)
+    assert bot.load_incidents() == []
+    assert not any("So'kinish" in (s["text"] or "") for s in fakebot.sent)
+
+
+@pytest.mark.asyncio
+async def test_removebadword_no_args_shows_picker(bot, ctx, fakebot):
+    bot.save_badwords({"words": ["rahmat"], "severe_words": [], "warnings": ["!"],
+                        "sacred_names": []})
+    update = FUpdate(SUPERADMIN_ID, "/removebadword", chat=FChat(chat_id=SUPERADMIN_ID))
+    ctx.bot = fakebot
+    ctx.args = []
+    await bot.cmd_removebadword(update, ctx)
+    assert update.message.last_markup is not None
+    assert "rahmat" in update.message.last_markup.inline_keyboard[0][0].text
+    assert update.message.last_markup.inline_keyboard[0][0].callback_data == "rmbw:normal:0"
+
+
+@pytest.mark.asyncio
+async def test_removebadword_button_removes_exact_word(bot, ctx, fakebot):
+    """Yozishda kelib chiqishi mumkin bo'lgan mos kelmaslikdan qat'iy nazar,
+    tugma orqali so'z aniq o'chirilishi kerak."""
+    bot.save_badwords({"words": ["rahmat"], "severe_words": [], "warnings": ["!"],
+                        "sacred_names": []})
+
+    class FakeQ:
+        def __init__(self):
+            self.data = "rmbw:normal:0"
+            self.from_user = FUser(SUPERADMIN_ID)
+            self.edits = []
+        async def answer(self, *a, **kw): pass
+        async def edit_message_text(self, text, **kw): self.edits.append(text)
+
+    q = FakeQ()
+    update = SimpleNamespace(callback_query=q)
+    ctx.bot = fakebot
+    await bot.callback_handler(update, ctx)
+    assert "rahmat" not in bot.load_badwords()["words"]
+    assert any("O'chirildi" in e for e in q.edits)
+
+
+@pytest.mark.asyncio
+async def test_profanity_notification_includes_matched_word(bot, ctx, fakebot):
+    bot.save_badwords({"words": ["yomonsoz"], "severe_words": [], "warnings": ["!"],
+                        "sacred_names": []})
+    chat = FChat(chat_id=-100311)
+    fakebot.chat_members[(chat.id, fakebot.id)] = "administrator"
+    update = FUpdate(111, "sen yomonsoz odamsan", chat=chat)
+    ctx.bot = fakebot
+    await bot.check_profanity(update, ctx)
+    incidents = bot.load_incidents()
+    assert incidents[-1]["matched_word"] == "yomonsoz"
+
+
+
     chat = SimpleNamespace(id=-100305, title="Grp")
     offender = FUser(111, username="off", first_name="Off")
     iid = bot.record_incident(chat, offender, "Umumiy", "yomon gap", "O'chirildi", False, False)

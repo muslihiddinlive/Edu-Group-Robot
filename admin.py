@@ -4,6 +4,7 @@ Avtomatik generatsiya qilingan modul — asl bot.py/core.py'dan ajratildi.
 import os
 import io
 import re
+import unicodedata
 import json
 import random
 import logging
@@ -446,7 +447,8 @@ def save_incidents(items: list):
     _jsave(INCIDENTS_FILE, {"items": items[-2000:]})
 
 def record_incident(chat, offender, target_name: str, text: str,
-                     consequence: str, admin: bool, sacred: bool) -> int:
+                     consequence: str, admin: bool, sacred: bool,
+                     matched_word: str = "") -> int:
     """So'kinish hodisasini log qiladi va incident_id qaytaradi."""
     items = load_incidents()
     iid   = (items[-1]["id"] + 1) if items else 1
@@ -460,6 +462,7 @@ def record_incident(chat, offender, target_name: str, text: str,
         "text": text[:500],
         "consequence": consequence,
         "was_admin": admin, "sacred_name": sacred,
+        "matched_word": matched_word,
     })
     save_incidents(items)
     return iid
@@ -610,15 +613,25 @@ async def cmd_setprize(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🏆 *{mdesc(name)}* uchun sovrinni yuboring _(rasm, GIF yoki stiker)_:",
         parse_mode="Markdown")
 
-def _has_badword(text: str, words: list) -> bool:
-    tl = text.lower()
+def _norm_word(s: str) -> str:
+    """Ko'rinmas belgilar/turli Unicode ko'rinishlar sabab so'z
+    solishtirishda mos kelmay qolmasligi uchun normalizatsiya qiladi."""
+    return unicodedata.normalize("NFKC", s).strip().lower()
+
+def _find_badword(text: str, words: list) -> str | None:
+    """Ro'yxatdan mos kelgan so'zning o'zini qaytaradi (topilmasa None)."""
+    tl = _norm_word(text)
     for w in words:
         if not w:
             continue
-        pattern = r'(?<![a-zA-Zа-яА-ЯёЁa-zA-Z0-9\u0400-\u04FF])' + re.escape(w) + r'(?![a-zA-Zа-яА-ЯёЁa-zA-Z0-9\u0400-\u04FF])'
+        wn = _norm_word(w)
+        pattern = r'(?<![a-zA-Zа-яА-ЯёЁa-zA-Z0-9\u0400-\u04FF])' + re.escape(wn) + r'(?![a-zA-Zа-яА-ЯёЁa-zA-Z0-9\u0400-\u04FF])'
         if re.search(pattern, tl):
-            return True
-    return False
+            return w
+    return None
+
+def _has_badword(text: str, words: list) -> bool:
+    return _find_badword(text, words) is not None
 
 def _random_warning(warnings: list) -> str:
     return random.choice(warnings) if warnings else "⚠️ So'kinma!"
@@ -1358,9 +1371,9 @@ async def cmd_addbadword(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["step"] = "addbadword_waiting"
         await update.message.reply_text("✏️ Qo'shmoqchi bo'lgan so'zni yozing:")
         return
-    word = " ".join(args).lower().strip()
+    word = _norm_word(" ".join(args))
     bw   = load_badwords()
-    if word in bw["words"] or word in bw["severe_words"]:
+    if word in [_norm_word(w) for w in bw["words"]] or word in [_norm_word(w) for w in bw["severe_words"]]:
         await update.message.reply_text(f"⚠️ `{word}` allaqachon ro'yxatda!",
                                         parse_mode="Markdown"); return
     bw["words"].append(word)
@@ -1431,19 +1444,39 @@ async def cmd_listbadwords(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_removebadword(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_superadmin(update.effective_user.id): return
     args = context.args
+    bw = load_badwords()
     if not args:
-        await update.message.reply_text("❌ `/removebadword so'z`", parse_mode="Markdown"); return
-    word = " ".join(args).lower().strip()
-    bw   = load_badwords()
-    if word in bw["words"]:
-        bw["words"].remove(word); save_badwords(bw)
+        # Argumentsiz chaqirilsa — ro'yxatni tugma qilib ko'rsatamiz,
+        # shunda yozishda xato/ko'rinmas belgi tufayli topilmay qolish
+        # muammosi butunlay chetlab o'tiladi.
+        rows = [[IKB(f"🗑 {w}", callback_data=f"rmbw:normal:{i}")]
+                for i, w in enumerate(bw.get("words", []))]
+        rows += [[IKB(f"🗑💀 {w}", callback_data=f"rmbw:severe:{i}")]
+                 for i, w in enumerate(bw.get("severe_words", []))]
+        if not rows:
+            await update.message.reply_text("Ro'yxat bo'sh."); return
+        await update.message.reply_text(
+            "O'chirish uchun so'zni tanlang:", reply_markup=InlineKeyboardMarkup(rows))
+        return
+    word = _norm_word(" ".join(args))
+    words_n  = [_norm_word(w) for w in bw["words"]]
+    severe_n = [_norm_word(w) for w in bw["severe_words"]]
+    if word in words_n:
+        del bw["words"][words_n.index(word)]; save_badwords(bw)
         await update.message.reply_text(f"✅ O'chirildi: `{word}`", parse_mode="Markdown")
-    elif word in bw["severe_words"]:
-        bw["severe_words"].remove(word); save_badwords(bw)
+    elif word in severe_n:
+        del bw["severe_words"][severe_n.index(word)]; save_badwords(bw)
         await update.message.reply_text(f"✅ Qo'pol ro'yxatdan o'chirildi: `{word}`",
                                         parse_mode="Markdown")
     else:
-        await update.message.reply_text(f"❌ `{word}` topilmadi!", parse_mode="Markdown")
+        rows = [[IKB(f"🗑 {w}", callback_data=f"rmbw:normal:{i}")]
+                for i, w in enumerate(bw.get("words", []))]
+        rows += [[IKB(f"🗑💀 {w}", callback_data=f"rmbw:severe:{i}")]
+                 for i, w in enumerate(bw.get("severe_words", []))]
+        await update.message.reply_text(
+            f"❌ `{word}` aniq mos topilmadi. Ro'yxatdan tanlang:",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(rows) if rows else None)
 
 async def cmd_removewarning(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_superadmin(update.effective_user.id): return
@@ -1550,17 +1583,18 @@ async def check_profanity(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if not msg or not msg.text or not user:
         return
-    if user.is_bot or user.id == SUPERADMIN:
+    if user.is_bot or is_admin_or_superadmin(user.id):
         return
     bw      = load_badwords()
     text    = msg.text
     severe  = bw.get("severe_words", [])
     normal  = bw.get("words", [])
     sacred  = bw.get("sacred_names", [])
-    has_severe = _has_badword(text, severe)
-    has_normal = _has_badword(text, normal)
+    has_severe = _find_badword(text, severe)
+    has_normal = _find_badword(text, normal)
     if not has_severe and not has_normal:
         return
+    matched_word = has_severe or has_normal
     has_sacred = _has_badword(text, sacred)
 
     warn_msg = mdesc(_random_warning(bw.get("warnings", [])))
@@ -1583,7 +1617,7 @@ async def check_profanity(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Diний shaxslar nomi bilan qo'shib so'kinish — eng qattiq chora,
     # admin bo'lsa ham (leniency ishlamaydi).
-    escalate = has_sacred and (has_severe or has_normal)
+    escalate = bool(has_sacred) and bool(has_severe or has_normal)
 
     deleted = False
     if bot_adm and (has_severe or escalate):
@@ -1650,28 +1684,39 @@ async def check_profanity(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(chat.id, f"⚠️ {ulink}, {warn_msg}", parse_mode="Markdown")
         consequence = ("O'chirildi" if deleted else "Ogohlantirildi") + (", Admin (🗿)" if usr_adm else "")
 
-    iid = record_incident(chat, user, target_name, text, consequence, usr_adm, escalate)
-    await _notify_incident(context.bot, chat, user, iid)
+    iid = record_incident(chat, user, target_name, text, consequence, usr_adm, escalate, matched_word)
+    await _notify_incident(context.bot, chat, user, iid, text, matched_word)
 
-async def _notify_incident(bot, chat, offender, incident_id: int):
-    """Guruh egasi (creator) va superadminga so'kinish haqida shaxsiy xabar
-    + 'Ko'rish' tugmasi bilan yuboradi."""
-    who = f"@{mdesc(offender.username)}" if offender.username else mdesc(offender.first_name)
-    text = (f"🚨 *So'kinish aniqlandi!*\n\n"
-            f"👤 {who}\n"
-            f"💬 Guruh: *{mdesc(chat.title or str(chat.id))}*")
-    kb = InlineKeyboardMarkup([[IKB("🔍 Ko'rish", callback_data=f"profview:{incident_id}")]])
-    recipients = {SUPERADMIN}
+async def _notify_incident(bot, chat, offender, incident_id: int, text: str, matched_word: str):
+    """So'kinish haqida AVVAL superadminga, keyin guruhning BARCHA
+    adminlariga (nafaqat creator) — kim, nima deb, qaysi so'z bilan
+    so'kingani aniq ko'rinadigan xabar yuboradi."""
+    who   = f"@{mdesc(offender.username)}" if offender.username else mdesc(offender.first_name)
+    excerpt = mdesc(text[:300])
+    body = (f"🚨 *So'kinish aniqlandi!*\n\n"
+            f"👤 Kim: {who} (`{offender.id}`)\n"
+            f"💬 Guruh: *{mdesc(chat.title or str(chat.id))}*\n"
+            f"🔤 So'z: `{mdesc(matched_word)}`\n"
+            f"📝 Xabar: _{excerpt}_")
+    kb = InlineKeyboardMarkup([[IKB("🔍 Batafsil", callback_data=f"profview:{incident_id}")]])
+
+    # 1) Avval — superadminga
+    try:
+        await bot.send_message(SUPERADMIN, body, parse_mode="Markdown", reply_markup=kb)
+    except Exception as e:
+        logger.debug(f"_notify_incident: superadminga yuborilmadi: {e}")
+
+    # 2) Keyin — guruhning BARCHA adminlariga (superadmin allaqachon oldi, takrorlanmasin)
     try:
         admins = await bot.get_chat_administrators(chat.id)
-        for a in admins:
-            if a.status == "creator":
-                recipients.add(a.user.id)
+        group_admin_ids = {a.user.id for a in admins
+                            if not getattr(a.user, "is_bot", False) and a.user.id != SUPERADMIN}
     except Exception as e:
         logger.warning(f"_notify_incident: adminlarni olib bo'lmadi: {e}")
-    for rid in recipients:
+        group_admin_ids = set()
+    for rid in group_admin_ids:
         try:
-            await bot.send_message(rid, text, parse_mode="Markdown", reply_markup=kb)
+            await bot.send_message(rid, body, parse_mode="Markdown", reply_markup=kb)
         except Exception as e:
             logger.debug(f"_notify_incident: {rid} ga yuborilmadi: {e}")
 

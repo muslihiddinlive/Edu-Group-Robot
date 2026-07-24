@@ -379,9 +379,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if step == "addbadword_waiting" and is_superadmin(uid):
         context.user_data.pop("step", None)
-        word = text.lower().strip()
+        word = _norm_word(text)
         bw   = load_badwords()
-        if word in bw["words"] or word in bw["severe_words"]:
+        if word in [_norm_word(w) for w in bw["words"]] or word in [_norm_word(w) for w in bw["severe_words"]]:
             await update.message.reply_text(f"⚠️ `{word}` allaqachon ro'yxatda!",
                                             parse_mode="Markdown")
             return
@@ -705,6 +705,24 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await q.answer()
     uid  = q.from_user.id
     data = q.data
+
+    # ── Badword ro'yxatidan tugma bilan o'chirish ──
+    if data.startswith("rmbw:"):
+        if not is_superadmin(uid):
+            await q.answer("⚠️ Faqat superadmin.", show_alert=True)
+            return
+        _, kind, idx_s = data.split(":")
+        idx = int(idx_s)
+        bw  = load_badwords()
+        key = "words" if kind == "normal" else "severe_words"
+        lst = bw.get(key, [])
+        if 0 <= idx < len(lst):
+            removed = lst.pop(idx)
+            save_badwords(bw)
+            await q.edit_message_text(f"✅ O'chirildi: `{removed}`", parse_mode="Markdown")
+        else:
+            await q.edit_message_text("⚠️ Bu so'z allaqachon o'chirilgan yoki ro'yxat o'zgargan.")
+        return
 
     # ── O'yin: "Keyingisi" (hech kim topolmasa, admin o'tkazib yuborishi) ──
     if data.startswith("skipq:"):
